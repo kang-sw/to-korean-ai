@@ -18,6 +18,28 @@ pub struct BookConfig {
     alias: String,
 }
 
+pub struct Line {
+    pub line_number: usize,
+    pub source: String,
+    pub translation_id: Option<usize>,
+    pub state: LineState,
+}
+
+pub struct TranslatedLine {
+    pub id: u64,
+    pub line_number: usize,
+    pub ntok_prompt: usize,
+    pub ntok_reply: usize,
+    pub content: String,
+}
+
+pub enum LineState {
+    ImplicitConfirm = 0,
+    ExplicitConfirm = 1,
+    Invalidated = 2,
+    InvalidateAllAfter = 3,
+}
+
 /* --------------------------------------- Creation Logics -------------------------------------- */
 #[derive(Debug, thiserror::Error)]
 pub enum BookCreationError {}
@@ -44,6 +66,11 @@ impl Book {
         book_name: &str,
         content: &mut dyn Iterator<Item = &str>,
     ) -> Result<Book, BookCreationError> {
+        // 1. 폴더 생성 -> book_name은 base64로 컨버전 후 기록
+        // 2. 텍스트 모두 임포트 -> 행 트리밍, 빈 행 삭제 등 작업 수행
+        // 3. 책 관련 파일 생성: DB, Config, ...
+        // 4. book.info 파일 생성
+
         todo!()
     }
 }
@@ -55,6 +82,13 @@ pub enum BookOpenError {}
 impl Book {
     /// 이미 존재하는 책을 엽니다.
     pub fn open(library_dir: &Path, book_name: &str) -> Result<Book, BookOpenError> {
+        // 1.
+
+        todo!()
+    }
+
+    /// 폴더 내 모든 책 이름을 열거합니다.
+    pub fn list(library_dir: &Path) -> std::io::Result<Vec<String>> {
         todo!()
     }
 }
