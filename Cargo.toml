@@ -1,0 +1,12 @@
+[package]
+name = "to-korean-ai"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["lib"]
+
+[dependencies]
+# --------------------------------------------- Core --------------------------------------------- #
+eframe = "0.21"
+lib = { package = "to-korean-ai-lib", path = "./lib" }
