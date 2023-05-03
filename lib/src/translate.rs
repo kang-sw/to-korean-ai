@@ -122,6 +122,8 @@ impl Instance {
 
 /* --------------------------------------- Translation Ops -------------------------------------- */
 
+impl Instance {}
+
 /* ---------------------------------------------------------------------------------------------- */
 /*                                          TEST SECTION                                          */
 /* ---------------------------------------------------------------------------------------------- */
@@ -157,6 +159,7 @@ mod __test {
     fn try_find_jp_sample(line_range: std::ops::Range<usize>) -> Option<String> {
         let manif_dir = env!("CARGO_MANIFEST_DIR");
         let sample_path = format!("{}/../.cargo/jp-sample.txt", manif_dir);
+        log::debug!("sample_path: {sample_path:?}");
 
         if !std::path::Path::new(&sample_path).exists() {
             log::warn!("ignoring test: sample file not found");
@@ -176,13 +179,13 @@ mod __test {
 
     #[test_log::test]
     #[ignore]
-    fn ping_api() {
+    fn run_noun_retr() {
         let Some(content) = try_find_jp_sample(0..10) else { return };
 
         exec_test(|h| async move {
             let setting = Settings::builder()
                 .source_lang(Language::Japanese)
-                .profile(Arc::new(lang::profiles::ToKoreanV1))
+                .profile(Arc::new(lang::profiles::KoreanV1))
                 .model(super::ChatModel::Gpt3_5)
                 .build();
 

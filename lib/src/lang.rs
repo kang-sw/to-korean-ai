@@ -61,58 +61,95 @@ impl Language {
 }
 
 pub mod profiles {
-    use std::borrow::Cow;
-
-    use default::default;
-    use indoc::indoc;
-    use lazy_static::lazy_static;
-
-    use super::Language;
-
     #[derive(Debug)]
-    pub struct ToKoreanV1;
+    pub struct KoreanV1;
 
-    macro_rules! static_lang_str_ko {
-        ($str:expr, $source_lang:expr) => {{
-            const FMT_BASE: &str = indoc::indoc!($str);
+    mod korean_v1 {
+        use std::borrow::Cow;
 
-            lazy_static! {
-                static ref JP: String = FMT_BASE.replace("{{LANG}}", "일본어");
-                static ref EN: String = FMT_BASE.replace("{{LANG}}", "영어");
-            };
+        use compact_str::CompactString;
+        use default::default;
+        use indoc::indoc;
+        use lazy_static::lazy_static;
 
-            match $source_lang {
-                Language::English => &EN,
-                Language::Japanese => &JP,
-                Language::Korean => panic!("Korean -> Korean not allowed!"),
+        use super::KoreanV1;
+        use crate::lang::Language;
+
+        macro_rules! static_lang_str_ko {
+            ($str:expr, $source_lang:expr) => {{
+                const FMT_BASE: &str = indoc::indoc!($str);
+
+                lazy_static! {
+                    static ref JP: String = FMT_BASE.replace("{{LANG}}", "일본어");
+                    static ref EN: String = FMT_BASE.replace("{{LANG}}", "영어");
+                };
+
+                match $source_lang {
+                    Language::English => &EN,
+                    Language::Japanese => &JP,
+                    Language::Korean => panic!("Korean -> Korean not allowed!"),
+                }
+            }};
+        }
+
+        impl super::super::PromptProfile for KoreanV1 {
+            fn proper_noun_instruction(&self, source_lang: Language) -> &str {
+                static_lang_str_ko!(
+                    r##"    제시된 {{LANG}} 원문으로부터,
+                 
+                            - "사람 이름"으로 추론되는 모든 단어를 추출하여 `person` 배열에 나열하십시오.
+                            - "고유 명사 지명"으로 추론되는 모든 단어를 추출하여 `location` 배열에 나열하십시오.
+                    
+                            출력 형식은 YAML입니다."##,
+                    source_lang
+                )
             }
-        }};
-    }
 
-    impl super::PromptProfile for ToKoreanV1 {
-        fn proper_noun_instruction(&self, source_lang: Language) -> &str {
-            static_lang_str_ko!(
-                r##"제시된 {{LANG}} 원문으로부터,
-                 
-                 - "사람 이름"으로 추론되는 모든 단어를 추출하여 `person` 배열에 나열하십시오.
-                 - "고유 명사 지명"으로 추론되는 모든 단어를 추출하여 `location` 배열에 나열하십시오.
-                 
-                 출력 형식은 YAML입니다."##,
-                source_lang
-            )
-        }
+            fn parse_proper_noun_output(
+                &self,
+                _source_lang: Language,
+                response: &str,
+            ) -> Option<Vec<compact_str::CompactString>> {
+                log::debug!("parsing noun output: {:?}", response);
 
-        fn parse_proper_noun_output(
-            &self,
-            source_lang: Language,
-            response: &str,
-        ) -> Option<Vec<compact_str::CompactString>> {
-            dbg!(response);
-            Some(default())
-        }
+                // 마크다운 문법으로 YAML 받음 ... 먼저 앞뒤의 ```yaml ~~ ``` 떼어낸다.
+                let lines: Vec<_> = response
+                    .lines()
+                    .skip_while(|line| !line.starts_with("```yaml"))
+                    .collect();
 
-        fn trans_instruction(&self, source_lang: super::Language) -> Cow<str> {
-            match source_lang {
+                let close_pos = lines
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, line)| line.starts_with("```"))
+                    .map(|(pos, _)| pos)?;
+
+                let lines = &lines[..close_pos];
+
+                #[derive(serde::Deserialize)]
+                struct Output<'a> {
+                    #[serde(borrow)]
+                    person: Vec<&'a str>,
+                    #[serde(borrow)]
+                    location: Vec<&'a str>,
+                }
+
+                let rebuilt_text = lines.join("\n");
+                let output: Output<'_> = serde_yaml::from_str(&rebuilt_text).ok()?;
+
+                Some(
+                    output
+                        .person
+                        .into_iter()
+                        .chain(output.location.into_iter())
+                        .map(|x| CompactString::new(x))
+                        .collect(),
+                )
+            }
+
+            fn trans_instruction(&self, source_lang: Language) -> Cow<str> {
+                match source_lang {
                 Language::English => todo!(),
                 Language::Korean => panic!("Korean -> Korean not allowed!"),
                 Language::Japanese => indoc!(
@@ -126,52 +163,82 @@ pub mod profiles {
                             * 등장인물의 대사를 포함한 모든 문장에서, 존댓말의 사용을 최소화한다."##
                 ),
             }.into()
-        }
-
-        fn query_relationship(
-            &self,
-            source_lang: Language,
-            previous_note: Option<&str>,
-        ) -> Cow<str> {
-            // TODO: previous_note 유/무에 따라 다른 프롬프트 제공
-
-            default()
-        }
-
-        fn trans_appendix_proper_noun_dict(
-            &self,
-            dest_lang: Language,
-            dict: &[(&str, &str)],
-        ) -> Cow<str> {
-            if dict.is_empty() {
-                return default();
             }
 
-            let mut buf = String::with_capacity(512);
-            {
-                let b: &mut dyn std::fmt::Write = &mut buf;
-                writeln!(b, "다음은 고유 명사의 번역을 제안하는 사전입니다:");
-                writeln!(b, "");
-                writeln!(b, "[시작]");
+            fn query_relationship(
+                &self,
+                source_lang: Language,
+                previous_note: Option<&str>,
+            ) -> Cow<str> {
+                // TODO: previous_note 유/무에 따라 다른 프롬프트 제공. previous_note 있으면
+                // 참고하여 관계도를 업데이트하도록 유도
 
-                for (src, dest) in dict {
-                    writeln!(b, "* {} -> {}", src, dest);
+                /*
+
+                **지시사항**
+
+                - 제공된 일본어 원문으로부터, 등장인물 사이의 관계를 그래프 형태로 작성한다.
+                - 중요도가 낮아 보이는 인물은 무시한다.
+
+                (도중에 맥락에 무관하게 장면이 변경될 수 있음)
+
+                **출력 형식**
+
+                - 등장인물 -> 다른등장인물: 상대에 대한 감정 및 사회적인 관계
+
+                (예시)
+                A -> B: 대등한 친구이며, 친애한다.
+                B -> A: 대등한 친구이지만, 죄의식을 갖고 있다.
+                C -> A: 무관한 사람이지만, 적대시한다.
+
+                ---
+
+                각 관계가 중복되지 않도록 주의하십시오.
+
+                지금부터 일본어 원문을 입력할 것입니다. 준비되었습니까?
+
+                */
+
+                default()
+            }
+
+            fn trans_appendix_proper_noun_dict(
+                &self,
+                _src_lang: Language,
+                dict: &[(&str, &str)],
+            ) -> Cow<str> {
+                if dict.is_empty() {
+                    return default();
                 }
 
-                writeln!(b, "[끝]");
+                let mut buf = String::with_capacity(512);
+
+                #[allow(unused_must_use)]
+                {
+                    let b: &mut dyn std::fmt::Write = &mut buf;
+                    writeln!(b, "다음은 고유 명사의 번역을 제안하는 사전입니다:");
+                    writeln!(b, "");
+                    writeln!(b, "[시작]");
+
+                    for (src, dest) in dict {
+                        writeln!(b, "* {} -> {}", src, dest);
+                    }
+
+                    writeln!(b, "[끝]");
+                }
+
+                buf.into()
             }
 
-            buf.into()
-        }
+            fn trans_appendix_relationship(&self, src_lang: Language, desc: &str) -> Cow<str> {
+                if desc.is_empty() {
+                    return default();
+                }
 
-        fn trans_appendix_relationship(&self, src_lang: Language, desc: &str) -> Cow<str> {
-            if desc.is_empty() {
-                return default();
+                // TODO: 다음은 인물 사이의 관계를 정리한 노트입니다. 참고하여 번역하십시오
+
+                default()
             }
-
-            // TODO: 다음은 인물 사이의 관계를 정리한 노트입니다. 참고하여 번역하십시오
-
-            default()
         }
     }
 }
