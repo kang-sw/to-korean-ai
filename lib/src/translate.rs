@@ -56,9 +56,6 @@ pub enum Error {
 
     #[error("Token length limit exceeded.")]
     TokenLengthLimit,
-
-    #[error("Line count mismatch: expected {expected}, actual {actual}")]
-    LineCountMismatch { expected: usize, actual: usize },
 }
 
 /* ------------------------------------------ Core Ops ------------------------------------------ */
@@ -160,13 +157,11 @@ impl Settings {
 /* --------------------------------------- Translation Ops -------------------------------------- */
 
 /// 번역기에 제공할 입력 컨텍스트
-///
-/// TODO: 등장 인물 관계 정보?
 #[derive(typed_builder::TypedBuilder, Debug)]
 pub struct TranslationInputContext<'a> {
     /// 단순히 앞부분의 원문입니다. 적당한 양을 잘라서 넣으면, 앞부분의 맥락을 파악하기 위한
     /// 프롬프트를 추가적으로 생성합니다.
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     leading_content: Option<&'a str>,
 
     /// 고유 명사의 Dictionary 정보입니다.
@@ -182,9 +177,10 @@ pub struct LineDesc {
 }
 
 /// 번역 결과를 담습니다.
-#[derive(custom_debug_derive::Debug, Clone)]
+#[derive(custom_debug_derive::Debug, Clone, getset::Getters)]
 pub struct TranslationResult {
     /// 번역된 문장의 인덱스 및 내용을 담습니다.
+    #[getset(get)]
     source_string: String,
 
     /// (Position, Size)
@@ -221,30 +217,6 @@ impl Instance {
         let mut req = opt.new_chat_req();
         let lang = opt.source_lang;
 
-        // 번역기 지시사항 전달
-        req.messages
-            .push(_gen(Role::System, opt.profile.trans_instruction(lang)));
-
-        // 부록에 고유 명사 사전 정의
-        {
-            let dict_prompt = opt
-                .profile
-                .trans_appendix_proper_noun_dict(lang, input_ctx.dictionary);
-
-            if dict_prompt.is_empty() == false {
-                req.messages.push(_gen(Role::System, dict_prompt));
-            }
-        }
-
-        // 부록에 맥락 파악을 위한 원문 추가
-        if let Some(x) = input_ctx
-            .leading_content
-            .map(|x| opt.profile.trans_appendix_leading_context_content(lang, x))
-            .filter(|x| x.is_empty() == false)
-        {
-            req.messages.push(_gen(Role::System, x));
-        }
-
         // 번역할 문장 작성
         let (src_lines, content) = content
             .enumerate()
@@ -260,6 +232,18 @@ impl Instance {
                     (lines, base)
                 },
             );
+
+        // 번역기 지시사항 전달
+        let prompt = opt.profile.translation(
+            lang,
+            input_ctx.dictionary,
+            input_ctx.leading_content.unwrap_or(""),
+            &content,
+        );
+
+        for (role, message) in prompt {
+            req.messages.push(_gen(role, message));
+        }
 
         req.messages.push(_gen(Role::User, content));
 
@@ -279,19 +263,13 @@ impl Instance {
                     byte_offset: x.as_ptr() as usize - base as usize,
                     byte_size: x.len(),
                 })
+                .filter(|x| x.src_index != usize::MAX)
                 .collect(),
             source_string: rep.assistant_reply,
             num_prompt_tokens: rep.num_prompt_tokens,
             num_compl_tokens: rep.num_compl_tokens,
             _no_build: default(),
         };
-
-        if result.lines.len() != src_lines.len() {
-            return Err(Error::LineCountMismatch {
-                expected: src_lines.len(),
-                actual: result.lines.len(),
-            });
-        }
 
         Ok(result)
     }
@@ -303,6 +281,9 @@ impl Instance {
 #[cfg(test)]
 mod __test {
     use std::{future::Future, sync::Arc};
+
+    use capture_it::capture;
+    use lazy_static::lazy_static;
 
     use crate::lang::{self, Language};
 
@@ -330,24 +311,34 @@ mod __test {
     /// 저작권 문제로 텍스트 내용을 레포에 포함시키지 않음. '.cargo' 디렉터리 아래에 'test_content'
     /// 파일이 없다면 테스트를 모두 제낀다.
     fn try_find_jp_sample(line_range: std::ops::Range<usize>) -> Option<String> {
-        let manif_dir = env!("CARGO_MANIFEST_DIR");
-        let sample_path = format!("{}/../.cargo/jp-sample.txt", manif_dir);
-        log::debug!("sample_path: {sample_path:?}");
-
-        if !std::path::Path::new(&sample_path).exists() {
-            log::warn!("ignoring test: sample file not found");
-            None
-        } else {
-            let content = std::fs::read_to_string(sample_path).ok()?;
-            let content = content
-                .lines()
-                .skip(line_range.start)
-                .take(line_range.end - line_range.start)
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            Some(content)
+        if line_range.len() == 0 {
+            return None;
         }
+
+        fn __lines() -> Option<Vec<String>> {
+            let manif_dir = env!("CARGO_MANIFEST_DIR");
+            let sample_path = format!("{}/../.cargo/jp-sample.txt", manif_dir);
+            log::debug!("sample_path: {sample_path:?}");
+
+            if !std::path::Path::new(&sample_path).exists() {
+                log::warn!("ignoring test: sample file not found");
+                None
+            } else {
+                let content = std::fs::read_to_string(sample_path).ok()?;
+                let content = content.lines().map(|x| x.to_owned()).collect::<Vec<_>>();
+
+                Some(content)
+            }
+        }
+
+        lazy_static! {
+            static ref LINES: Option<Vec<String>> = __lines();
+        }
+
+        let lines = LINES.as_ref()?;
+        let lines = lines.get(line_range)?.join("\n");
+
+        Some(lines)
     }
 
     #[test_log::test]
@@ -388,6 +379,105 @@ mod __test {
             for line in res.lines() {
                 println!("{}. {}", line.0, line.1);
             }
+        });
+    }
+
+    #[test_log::test]
+    #[ignore]
+    fn run_translate_with_context() {
+        let Some(pre_ctx) = try_find_jp_sample(0..10) else { return };
+        let Some(content) = try_find_jp_sample(10..20) else { return };
+
+        exec_test(|h| async move {
+            let setting = Settings::builder()
+                .source_lang(Language::Japanese)
+                .profile(Arc::new(lang::profiles::KoreanV1))
+                .build();
+
+            let input = TranslationInputContext::builder()
+                .leading_content(Some(&pre_ctx))
+                .build();
+
+            let res = h
+                .translate(&input, &mut content.lines(), &setting)
+                .await
+                .unwrap();
+
+            let _ = dbg!(&res);
+
+            for line in res.lines() {
+                println!("{}. {}", line.0, line.1);
+            }
+        });
+    }
+
+    #[test_log::test]
+    #[ignore]
+    fn run_translate_with_context_burst() {
+        exec_test(|h| async move {
+            const STEPS: usize = 10;
+            const PRECTX: usize = 0;
+            const BURST: usize = 10;
+
+            let setting = Settings::builder()
+                .source_lang(Language::Japanese)
+                .profile(Arc::new(lang::profiles::KoreanV1))
+                .build();
+
+            let futures = (0..BURST)
+                .map(|x| {
+                    (
+                        try_find_jp_sample((x * STEPS).saturating_sub(PRECTX)..x * STEPS),
+                        try_find_jp_sample(x * STEPS..(x + 1) * STEPS),
+                    )
+                })
+                .filter_map(|(a, b)| b.map(|b| (a, b)))
+                .map(|(pre_ctx, content)| {
+                    capture!([&setting, &h], async move {
+                        let input = TranslationInputContext::builder()
+                            .leading_content(pre_ctx.as_ref().map(|x| x.as_str()))
+                            .build();
+
+                        log::debug!("pre_ctx: {:?}", pre_ctx.is_some());
+                        h.translate(&input, &mut content.lines(), &setting).await
+                    })
+                });
+
+            let mut total_prompt = 0;
+            let mut total_compl = 0;
+
+            for (index, result) in futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                print!("[{}..{}] ", index * STEPS, (index + 1) * STEPS);
+
+                if result.is_err() {
+                    println!("error: {:?}", result.unwrap_err());
+                    continue;
+                }
+
+                let res = result.unwrap();
+                println!(
+                    "ok, {} lines, {}(p) + {}(r) tokens",
+                    res.lines.len(),
+                    res.num_prompt_tokens,
+                    res.num_compl_tokens,
+                );
+
+                for line in res.lines() {
+                    println!("{:4}: {}", line.0 + index * STEPS, line.1);
+                }
+
+                total_prompt += res.num_prompt_tokens;
+                total_compl += res.num_compl_tokens;
+            }
+
+            print!(
+                "done. total used {}(p) + {}(r) tokens",
+                total_prompt, total_compl
+            );
         });
     }
 }

@@ -46,6 +46,7 @@ lazy_static = "1.0"
 [dev-dependencies]
 anyhow = "1.0"
 env_logger = "0.10"
+futures = "0.3"
 
 [dev-dependencies.test-log]
 version = "0.2"

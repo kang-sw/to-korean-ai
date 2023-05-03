@@ -1,3 +1,4 @@
+use async_openai::types::Role;
 use compact_str::CompactString;
 use std::borrow::Cow;
 
@@ -12,22 +13,14 @@ pub trait PromptProfile: Send + Sync + std::fmt::Debug {
         response: &str,
     ) -> Option<Vec<CompactString>>;
 
-    /// 번역 단계에서 제공: 적절한 번역 지시 사항을 지정합니다. 핵심이 되는 프롬프트입니다.
-    fn trans_instruction(&self, src_lang: Language) -> Cow<str>;
-
-    /// 번역 단계에서 제공: 고유 명사 사전에 대한 시스템 안내 프롬프트를 생성합니다.
-    fn trans_appendix_proper_noun_dict(
+    /// 번역 단계에서 제공: 셋업 시스템 프롬프트입니다.
+    fn translation(
         &self,
-        dest_lang: Language,
+        src_lang: Language,
         dict: &[(&str, &str)],
-    ) -> Cow<str>;
-
-    /// 번역 단계에서 제공: 제공된 원문의 앞부분을 제공합니다.
-    fn trans_appendix_leading_context_content(&self, src_lang: Language, content: &str)
-        -> Cow<str>;
-
-    /// 번역 단계에서 제공: 인물 사이의 관계 서술에 대한 시스템 안내 프롬프트입니다.
-    fn trans_appendix_relationship(&self, src_lang: Language, desc: &str) -> Cow<str>;
+        pre_ctx: &str,
+        content: &str,
+    ) -> Vec<(Role, Cow<str>)>;
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Copy, Default)]
@@ -65,6 +58,7 @@ pub mod profiles {
     mod korean_v1 {
         use std::borrow::Cow;
 
+        use async_openai::types::Role;
         use compact_str::CompactString;
         use default::default;
         use indoc::indoc;
@@ -147,78 +141,64 @@ pub mod profiles {
                 )
             }
 
-            fn trans_instruction(&self, source_lang: Language) -> Cow<str> {
-                match source_lang {
-                    Language::English => todo!(),
-                    Language::Korean => panic!("Korean -> Korean not allowed!"),
-                    Language::Japanese => indoc!(
-                        r##"    # 기본 지시사항
-
-                                제공되는 일본어 소설을 한국어로 번역해야 한다. 다음은 그 요구 조건이다.
-
-                                * 등장인물의 대사를 포함한 모든 문장에서, 존댓말의 사용을 최소화한다.
-                                * 원문의 뉘앙스를 유지하되, 자연스러운 한국어 문장으로 가공한다."##
-                    ),
-                }
-                .into()
-            }
-
-            fn trans_appendix_proper_noun_dict(
-                &self,
-                _src_lang: Language,
-                dict: &[(&str, &str)],
-            ) -> Cow<str> {
-                if dict.is_empty() {
-                    return default();
-                }
-
-                let mut buf = String::with_capacity(512);
-
-                #[allow(unused_must_use)]
-                {
-                    let b: &mut dyn std::fmt::Write = &mut buf;
-                    writeln!(
-                        b,
-                        indoc!(
-                            r##"    ## 부록: 사전
-                                    
-                                    다음은 고유 명사의 번역에 참고할 수 있는 사전이다.
-                                    
-                                    [시작]"##
-                        )
-                    );
-
-                    for (src, dest) in dict {
-                        if dest.is_empty() {
-                            log::warn!("empty translation for {} included", src);
-                            continue;
-                        }
-
-                        writeln!(b, "* {} -> {}", src, dest);
-                    }
-
-                    writeln!(b, "[끝]");
-                }
-
-                buf.into()
-            }
-
-            fn trans_appendix_relationship(&self, src_lang: Language, desc: &str) -> Cow<str> {
-                if desc.is_empty() {
-                    return default();
-                }
-
-                // TODO: 다음은 인물 사이의 관계를 정리한 노트입니다. 참고하여 번역하십시오
-
-                default()
-            }
-
-            fn trans_appendix_leading_context_content(
+            fn translation(
                 &self,
                 src_lang: Language,
+                dict: &[(&str, &str)],
+                pre_ctx: &str,
                 content: &str,
-            ) -> Cow<str> {
-                default()
+            ) -> Vec<(Role, Cow<str>)> {
+                let mut ret = Vec::with_capacity(10);
+                let lang = src_lang.to_korean();
+
+                ret.push((
+                    Role::System,
+                    format!("맥락 기반의 한국어 -> {lang} 번역기").into(),
+                ));
+
+                if pre_ctx.is_empty() == false {
+                    ret.push((
+                        Role::User,
+                        format!(
+                            concat!(
+                                "다음은 {_1} 소설 앞부분의 내용입니다. 문맥을 파악하기 위해 제공되었습니다.\n\n",
+                                "[[[시작]]]\n{_0}\n[[[끝]]]\n\n",
+                                "내용을 이해했습니까?"
+                            ),
+                            _0 = pre_ctx,
+                            _1 = lang,
+                        )
+                        .into(),
+                    ));
+
+                    ret.push((
+                        Role::Assistant,
+                        format!("네. 입력된 {lang} 소설의 문맥을 파악했습니다.").into(),
+                    ));
+                }
+
+                if dict.is_empty() == false {
+                    // TODO: 사전 프롬프트 출력하기
+                }
+
+                ret.push((
+                    Role::User,
+                    format!(
+                        concat!(
+                            "다음 규칙을 바탕으로 {lang} 소설을 자연스러운 한국어로 번역하십시오.\n\n",
+                            "- 등장인물의 대사를 포함한 모든 문장에서, 존댓말의 사용을 최소화한다.\n",
+                            "- 뛰어는 품질의 문장을 작성한다.\n",
+                            "\n\n\n",
+                            "<{lang} 소설 원문>\n\n",
+                            "{content}"
+                        ),
+                        lang = lang,
+                        content = content
+                    )
+                    .into(),
+                ));
+
+                ret
             }
         }
     }

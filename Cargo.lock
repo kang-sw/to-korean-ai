@@ -2977,6 +2977,7 @@ dependencies = [
  "derive_more",
  "dirs 5.0.1",
  "env_logger",
+ "futures",
  "getset",
  "indoc",
  "lazy_static",
