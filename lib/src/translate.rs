@@ -29,6 +29,7 @@ pub enum ChatModel {
 #[derive(Debug, typed_builder::TypedBuilder)]
 pub struct Settings {
     source_lang: Language,
+    dest_lang: Language,
     model: ChatModel,
 }
 
@@ -43,11 +44,13 @@ impl Instance {
 
 /* ---------------------------------------- Proper Nouns ---------------------------------------- */
 
+#[derive(custom_debug_derive::Debug)]
 pub struct ProperNounRetrievalResult {
     pub nouns: Vec<CompactString>,
     pub num_prompt_tokens: usize,
     pub num_compl_tokens: usize,
 
+    #[debug(skip)]
     _no_build: (),
 }
 
@@ -84,7 +87,9 @@ impl Instance {
 
         req.messages.push(msg(
             Role::System,
-            opt.source_lang.profile().proper_noun_instruction(),
+            opt.dest_lang
+                .profile()
+                .proper_noun_instruction(opt.source_lang),
         ));
 
         req.messages.push(msg(Role::User, content));
@@ -99,9 +104,9 @@ impl Instance {
         }
 
         let nouns = opt
-            .source_lang
+            .dest_lang
             .profile()
-            .parse_proper_noun_output(&msg.message.content)
+            .parse_proper_noun_output(opt.source_lang, &msg.message.content)
             .ok_or(ProperNounRetrievalError::NounListParseFailed)?;
 
         let (n_prompt, n_compl) = rep
@@ -127,6 +132,10 @@ impl Instance {
 mod __test {
     use std::future::Future;
 
+    use crate::lang::Language;
+
+    use super::Settings;
+
     fn exec_test<S, F>(scope: S)
     where
         F: Future<Output = ()>,
@@ -146,8 +155,43 @@ mod __test {
             .block_on(scope(inst));
     }
 
-    #[test]
+    /// 저작권 문제로 텍스트 내용을 레포에 포함시키지 않음. '.cargo' 디렉터리 아래에 'test_content'
+    /// 파일이 없다면 테스트를 모두 제낀다.
+    fn try_find_jp_sample(line_range: std::ops::Range<usize>) -> Option<String> {
+        let manif_dir = env!("CARGO_MANIFEST_DIR");
+        let sample_path = format!("{}/../.cargo/jp-sample.txt", manif_dir);
+        dbg!(&sample_path);
+
+        if !std::path::Path::new(&sample_path).exists() {
+            log::warn!("ignoring test: sample file not found");
+            None
+        } else {
+            let content = std::fs::read_to_string(sample_path).ok()?;
+            let content = content
+                .lines()
+                .skip(line_range.start)
+                .take(line_range.end - line_range.start)
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            Some(content)
+        }
+    }
+
+    #[test_log::test]
+    #[ignore]
     fn ping_api() {
-        exec_test(|h| async {});
+        let Some(content) = try_find_jp_sample(0..10) else { return };
+
+        exec_test(|h| async move {
+            let setting = Settings::builder()
+                .source_lang(Language::Japanese)
+                .dest_lang(Language::Korean)
+                .model(super::ChatModel::Gpt3_5)
+                .build();
+
+            let res = h.retrieve_proper_nouns(&content, &setting).await;
+            let _ = dbg!("res: {:#?}", res);
+        });
     }
 }

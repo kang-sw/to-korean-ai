@@ -1,15 +1,19 @@
 use compact_str::CompactString;
 
 pub trait PromptProfile {
-    fn proper_noun_instruction(&self) -> &str;
+    fn proper_noun_instruction(&self, dest_lang: Language) -> &str;
 
     /// 서버 응답을 파싱해서 고유명사 리스트 추출. Parse 실패 시 None
-    fn parse_proper_noun_output(&self, response: &str) -> Option<Vec<CompactString>>;
+    fn parse_proper_noun_output(
+        &self,
+        dest_lang: Language,
+        response: &str,
+    ) -> Option<Vec<CompactString>>;
 
-    fn translate_instruction(&self) -> &str;
-    fn translate_reference_1(&self) -> &str;
-    fn translate_reference_2(&self) -> &str;
-    fn translate_ready(&self) -> &str;
+    fn translate_instruction(&self, dest_lang: Language) -> &str;
+    fn translate_reference_1(&self, dest_lang: Language) -> &str;
+    fn translate_reference_2(&self, dest_lang: Language) -> &str;
+    fn translate_ready(&self, dest_lang: Language) -> &str;
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Copy, Default)]
@@ -52,10 +56,12 @@ pub mod profiles {
     use default::default;
     use indoc::indoc;
 
+    use super::Language;
+
     pub struct ToKorean;
 
     impl super::PromptProfile for ToKorean {
-        fn proper_noun_instruction(&self) -> &str {
+        fn proper_noun_instruction(&self, dest_lang: Language) -> &str {
             indoc!(
                 r##"제시된 일본어 원문으로부터,
                  
@@ -68,25 +74,26 @@ pub mod profiles {
 
         fn parse_proper_noun_output(
             &self,
+            dest_lang: Language,
             response: &str,
         ) -> Option<Vec<compact_str::CompactString>> {
             dbg!(response);
             default()
         }
 
-        fn translate_instruction(&self) -> &str {
+        fn translate_instruction(&self, dest_lang: super::Language) -> &str {
             todo!()
         }
 
-        fn translate_reference_1(&self) -> &str {
+        fn translate_reference_1(&self, dest_lang: super::Language) -> &str {
             todo!()
         }
 
-        fn translate_reference_2(&self) -> &str {
+        fn translate_reference_2(&self, dest_lang: super::Language) -> &str {
             todo!()
         }
 
-        fn translate_ready(&self) -> &str {
+        fn translate_ready(&self, dest_lang: super::Language) -> &str {
             todo!()
         }
     }
