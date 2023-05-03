@@ -415,16 +415,17 @@ mod __test {
     #[ignore]
     fn run_translate_with_context_burst() {
         exec_test(|h| async move {
-            const STEPS: usize = 10;
-            const PRECTX: usize = 0;
-            const BURST: usize = 10;
+            const STEPS: usize = 12;
+            const PRECTX: usize = 8;
+            const BURST: usize = 15;
+            const OFFSET: usize = 0;
 
             let setting = Settings::builder()
                 .source_lang(Language::Japanese)
                 .profile(Arc::new(lang::profiles::KoreanV1))
                 .build();
 
-            let futures = (0..BURST)
+            let futures = (OFFSET..OFFSET + BURST)
                 .map(|x| {
                     (
                         try_find_jp_sample((x * STEPS).saturating_sub(PRECTX)..x * STEPS),
@@ -450,6 +451,7 @@ mod __test {
                 .await
                 .into_iter()
                 .enumerate()
+                .map(|(a, b)| (a + OFFSET, b))
             {
                 print!("[{}..{}] ", index * STEPS, (index + 1) * STEPS);
 
