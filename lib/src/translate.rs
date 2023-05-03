@@ -4,10 +4,7 @@ use std::{borrow::Cow, sync::Arc};
 
 use async_openai::{
     error::OpenAIError,
-    types::{
-        ChatChoice, ChatCompletionRequestMessage, CreateChatCompletionRequest,
-        CreateChatCompletionResponse, Role,
-    },
+    types::{ChatCompletionRequestMessage, CreateChatCompletionRequest, Role},
 };
 use compact_str::CompactString;
 use default::default;
@@ -169,25 +166,45 @@ impl Settings {
 pub struct TranslationInputContext<'a> {
     /// 단순히 앞부분의 원문입니다. 적당한 양을 잘라서 넣으면, 앞부분의 맥락을 파악하기 위한
     /// 프롬프트를 추가적으로 생성합니다.
+    #[builder(default, setter(strip_option))]
     leading_content: Option<&'a str>,
 
     /// 고유 명사의 Dictionary 정보입니다.
+    #[builder(default = &[])]
     dictionary: &'a [(&'a str, &'a str)],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LineDesc {
+    src_index: usize,
+    byte_offset: usize,
+    byte_size: usize,
+}
+
 /// 번역 결과를 담습니다.
+#[derive(custom_debug_derive::Debug, Clone)]
 pub struct TranslationResult {
     /// 번역된 문장의 인덱스 및 내용을 담습니다.
     source_string: String,
 
     /// (Position, Size)
-    lines: Vec<(usize, usize)>,
+    lines: Vec<LineDesc>,
 
     /// 번역에 사용한 토큰 개수입니다.
     pub num_prompt_tokens: usize,
     pub num_compl_tokens: usize,
 
+    #[debug(skip)]
     _no_build: (),
+}
+
+impl TranslationResult {
+    pub fn lines(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.lines.iter().map(move |x| {
+            let s = &self.source_string[x.byte_offset..][..x.byte_size];
+            (x.src_index, s)
+        })
+    }
 }
 
 impl Instance {
@@ -229,29 +246,39 @@ impl Instance {
         }
 
         // 번역할 문장 작성
-        let (src_line_count, content) = content.map(|x| x.trim()).fold(
-            (0, String::with_capacity(1024)),
-            |(mut c, mut base), x| {
-                c += 1;
+        let (src_lines, content) = content
+            .enumerate()
+            .filter_map(|(i, x)| Some((i, x.trim())).filter(|(_, x)| x.is_empty() == false))
+            .map(|(i, x)| (i, x.trim()))
+            .fold(
+                (Vec::with_capacity(32), String::with_capacity(1024)),
+                |(mut lines, mut base), (src_line_num, x)| {
+                    lines.push(src_line_num);
 
-                base.push_str(x);
-                base.push_str("\n\n");
-                (c, base)
-            },
-        );
+                    base.push_str(x);
+                    base.push_str("\n\n");
+                    (lines, base)
+                },
+            );
 
         req.messages.push(_gen(Role::User, content));
 
         // 번역 요청
         let rep = self._call(req).await?;
         let base = rep.assistant_reply.as_bytes().as_ptr();
+        let mut src_liner = src_lines.iter().copied();
 
         let result = TranslationResult {
             lines: rep
                 .assistant_reply
                 .lines()
                 .filter_map(|x| Some(x.trim()).filter(|x| x.is_empty() == false))
-                .map(|x| (x.as_bytes().as_ptr() as usize - base as usize, x.len()))
+                .map(|x| x.as_bytes())
+                .map(|x| LineDesc {
+                    src_index: src_liner.next().unwrap_or(usize::MAX),
+                    byte_offset: x.as_ptr() as usize - base as usize,
+                    byte_size: x.len(),
+                })
                 .collect(),
             source_string: rep.assistant_reply,
             num_prompt_tokens: rep.num_prompt_tokens,
@@ -259,9 +286,9 @@ impl Instance {
             _no_build: default(),
         };
 
-        if result.lines.len() != src_line_count {
+        if result.lines.len() != src_lines.len() {
             return Err(Error::LineCountMismatch {
-                expected: src_line_count,
+                expected: src_lines.len(),
                 actual: result.lines.len(),
             });
         }
@@ -279,7 +306,7 @@ mod __test {
 
     use crate::lang::{self, Language};
 
-    use super::Settings;
+    use super::{Settings, TranslationInputContext};
 
     fn exec_test<S, F>(scope: S)
     where
@@ -332,11 +359,35 @@ mod __test {
             let setting = Settings::builder()
                 .source_lang(Language::Japanese)
                 .profile(Arc::new(lang::profiles::KoreanV1))
-                .model(super::ChatModel::Gpt_3_5_Turbo)
                 .build();
 
             let res = h.retrieve_proper_nouns(&content, &setting).await;
             let _ = dbg!(res);
+        });
+    }
+
+    #[test_log::test]
+    #[ignore]
+    fn run_translate_basic() {
+        let Some(content) = try_find_jp_sample(0..10) else { return };
+
+        exec_test(|h| async move {
+            let setting = Settings::builder()
+                .source_lang(Language::Japanese)
+                .profile(Arc::new(lang::profiles::KoreanV1))
+                .build();
+
+            let input = TranslationInputContext::builder().build();
+            let res = h
+                .translate(&input, &mut content.lines(), &setting)
+                .await
+                .unwrap();
+
+            let _ = dbg!(&res);
+
+            for line in res.lines() {
+                println!("{}. {}", line.0, line.1);
+            }
         });
     }
 }
