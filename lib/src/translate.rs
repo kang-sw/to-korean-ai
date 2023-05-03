@@ -1,5 +1,7 @@
 //! 번역 작업을 위한 OpenAI API 프롬프트 추상화
 
+use std::sync::Arc;
+
 use async_openai::{
     error::OpenAIError,
     types::{ChatCompletionRequestMessage, CreateChatCompletionRequest, Role},
@@ -7,7 +9,7 @@ use async_openai::{
 use compact_str::CompactString;
 use default::default;
 
-use crate::lang::Language;
+use crate::lang::{Language, PromptProfile};
 
 static_assertions::assert_impl_all!(Instance: Send, Sync, Unpin);
 
@@ -21,15 +23,13 @@ pub struct Instance {
 pub enum ChatModel {
     #[display(fmt = "gpt-3.5-turbo")]
     Gpt3_5,
-    #[display(fmt = "gpt-4")]
-    Gpt4,
 }
 
 /// 번역에 필요한 정적 세팅(모델 정보, 토큰 길이 등)을 포함합니다.
 #[derive(Debug, typed_builder::TypedBuilder)]
 pub struct Settings {
     source_lang: Language,
-    dest_lang: Language,
+    profile: Arc<dyn PromptProfile>,
     model: ChatModel,
 }
 
@@ -87,9 +87,7 @@ impl Instance {
 
         req.messages.push(msg(
             Role::System,
-            opt.dest_lang
-                .profile()
-                .proper_noun_instruction(opt.source_lang),
+            opt.profile.proper_noun_instruction(opt.source_lang),
         ));
 
         req.messages.push(msg(Role::User, content));
@@ -104,8 +102,7 @@ impl Instance {
         }
 
         let nouns = opt
-            .dest_lang
-            .profile()
+            .profile
             .parse_proper_noun_output(opt.source_lang, &msg.message.content)
             .ok_or(ProperNounRetrievalError::NounListParseFailed)?;
 
@@ -130,9 +127,9 @@ impl Instance {
 /* ---------------------------------------------------------------------------------------------- */
 #[cfg(test)]
 mod __test {
-    use std::future::Future;
+    use std::{future::Future, sync::Arc};
 
-    use crate::lang::Language;
+    use crate::lang::{self, Language};
 
     use super::Settings;
 
@@ -160,7 +157,6 @@ mod __test {
     fn try_find_jp_sample(line_range: std::ops::Range<usize>) -> Option<String> {
         let manif_dir = env!("CARGO_MANIFEST_DIR");
         let sample_path = format!("{}/../.cargo/jp-sample.txt", manif_dir);
-        dbg!(&sample_path);
 
         if !std::path::Path::new(&sample_path).exists() {
             log::warn!("ignoring test: sample file not found");
@@ -186,12 +182,12 @@ mod __test {
         exec_test(|h| async move {
             let setting = Settings::builder()
                 .source_lang(Language::Japanese)
-                .dest_lang(Language::Korean)
+                .profile(Arc::new(lang::profiles::ToKoreanV1))
                 .model(super::ChatModel::Gpt3_5)
                 .build();
 
             let res = h.retrieve_proper_nouns(&content, &setting).await;
-            let _ = dbg!("res: {:#?}", res);
+            let _ = dbg!(res);
         });
     }
 }

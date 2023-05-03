@@ -2966,6 +2966,7 @@ dependencies = [
  "env_logger",
  "getset",
  "indoc",
+ "lazy_static",
  "log",
  "rusqlite",
  "serde",
