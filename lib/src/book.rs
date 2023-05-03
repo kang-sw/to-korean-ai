@@ -7,12 +7,19 @@
 
 use std::path::Path;
 
-pub struct Book {}
+use compact_str::CompactString;
+
+use crate::lang::Language;
+
+#[derive(Debug)]
+pub struct Book {
+    db: rusqlite::Connection,
+}
 
 #[derive(config_it::Template, Debug, Clone)]
 pub struct BookConfig {
     #[config]
-    source_lang: String,
+    source_lang: Language,
 
     #[config]
     alias: String,
@@ -40,7 +47,9 @@ pub enum LineState {
     InvalidateAllAfter = 3,
 }
 
-/* --------------------------------------- Creation Logics -------------------------------------- */
+/* ---------------------------------------------------------------------------------------------- */
+/*                                            CREATION                                            */
+/* ---------------------------------------------------------------------------------------------- */
 #[derive(Debug, thiserror::Error)]
 pub enum BookCreationError {}
 
@@ -93,6 +102,32 @@ impl Book {
     }
 }
 
-/* --------------------------------------- Content Update --------------------------------------- */
+/* ---------------------------------------------------------------------------------------------- */
+/*                                           DICTIONARY                                           */
+/* ---------------------------------------------------------------------------------------------- */
 
-/* ---------------------------------------- Content Seek ---------------------------------------- */
+/* --------------------------------------- Dict - Lookups --------------------------------------- */
+#[derive(thiserror::Error, Debug)]
+pub enum DictionaryUpdateError {}
+
+impl Book {
+    /// 책의 사전을 검색합니다.
+    pub async fn dict_lookup<'a>(
+        &self,
+        detected_names: impl IntoIterator<Item = &'a str> + ExactSizeIterator,
+    ) -> Vec<(CompactString, CompactString)> {
+        todo!()
+    }
+
+    pub async fn dict_update(
+        &self,
+        name: &str,
+        translation: &str,
+    ) -> Result<(), DictionaryUpdateError> {
+        todo!()
+    }
+}
+
+/* ---------------------------------------------------------------------------------------------- */
+/*                                            CONTENTS                                            */
+/* ---------------------------------------------------------------------------------------------- */
