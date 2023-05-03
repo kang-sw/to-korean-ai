@@ -10,3 +10,11 @@ members = ["lib"]
 # --------------------------------------------- Core --------------------------------------------- #
 eframe = "0.21"
 lib = { package = "to-korean-ai-lib", path = "./lib" }
+
+log = "0.4"
+env_logger = "0.10"
+
+tokio = "1.0"
+
+[dev-dependencies]
+clap = { version = "4.0", features = ["derive"] }
