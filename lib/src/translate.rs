@@ -171,7 +171,7 @@ pub struct TranslationInputContext<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LineDesc {
-    src_index: usize,
+    src_index: Option<usize>,
     byte_offset: usize,
     byte_size: usize,
 }
@@ -195,7 +195,7 @@ pub struct TranslationResult {
 }
 
 impl TranslationResult {
-    pub fn lines(&self) -> impl Iterator<Item = (usize, &str)> {
+    pub fn lines(&self) -> impl Iterator<Item = (Option<usize>, &str)> {
         self.lines.iter().map(move |x| {
             let s = &self.source_string[x.byte_offset..][..x.byte_size];
             (x.src_index, s)
@@ -259,11 +259,10 @@ impl Instance {
                 .filter_map(|x| Some(x.trim()).filter(|x| x.is_empty() == false))
                 .map(|x| x.as_bytes())
                 .map(|x| LineDesc {
-                    src_index: src_liner.next().unwrap_or(usize::MAX),
+                    src_index: src_liner.next(),
                     byte_offset: x.as_ptr() as usize - base as usize,
                     byte_size: x.len(),
                 })
-                .filter(|x| x.src_index != usize::MAX)
                 .collect(),
             source_string: rep.assistant_reply,
             num_prompt_tokens: rep.num_prompt_tokens,
@@ -377,7 +376,7 @@ mod __test {
             let _ = dbg!(&res);
 
             for line in res.lines() {
-                println!("{}. {}", line.0, line.1);
+                println!("{:?}. {}", line.0, line.1);
             }
         });
     }
@@ -406,7 +405,7 @@ mod __test {
             let _ = dbg!(&res);
 
             for line in res.lines() {
-                println!("{}. {}", line.0, line.1);
+                println!("{:?}. {}", line.0, line.1);
             }
         });
     }
@@ -469,7 +468,7 @@ mod __test {
                 );
 
                 for line in res.lines() {
-                    println!("{:4}: {}", line.0 + index * STEPS, line.1);
+                    println!("{:?}: {}", line.0.map(|x| x + index * STEPS), line.1);
                 }
 
                 total_prompt += res.num_prompt_tokens;

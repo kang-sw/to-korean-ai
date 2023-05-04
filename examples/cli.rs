@@ -1,7 +1,24 @@
-use std::{mem::swap, num::NonZeroUsize, slice::SliceIndex, sync::Arc};
+use std::{
+    mem::swap,
+    num::NonZeroUsize,
+    slice::SliceIndex,
+    sync::{
+        atomic::{AtomicBool, Ordering::Relaxed},
+        Arc,
+    },
+};
 
-use lib::{config_it::lazy_static, translate};
-use tokio::sync::{mpsc, oneshot};
+use capture_it::capture;
+use lib::{
+    async_openai::error::OpenAIError,
+    config_it::lazy_static,
+    translate::{self, TranslationInputContext},
+};
+use parking_lot::Mutex;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::spawn_blocking,
+};
 
 #[derive(clap::Parser)]
 struct Args {
@@ -29,7 +46,7 @@ struct Args {
     batch_size: NonZeroUsize,
 
     /// Maximum characters for single translation. This is the most important parameter.
-    #[arg(short = 'M', long, default_value_t = 768)]
+    #[arg(short = 'M', long, default_value_t = 1512)]
     max_chars: usize,
 
     /// Number of parallel translation jobs. This is affected by OpenAI API rate limit.
@@ -50,6 +67,10 @@ struct Args {
     /// Number of line separator between every lines.
     #[arg(long, default_value_t = 1)]
     line_sep: usize,
+
+    /// Print source text line at the same time.
+    #[arg(long = "print-source")]
+    print_source_block: bool,
 }
 
 impl Args {
@@ -75,7 +96,7 @@ fn main() {
         .build()
         .unwrap();
 
-    rt.block_on(async_main(h.into()));
+    tokio::task::LocalSet::new().block_on(&rt, async_main(h.into()));
 }
 
 /* ---------------------------------------------------------------------------------------------- */
@@ -105,15 +126,29 @@ async fn async_main(transl: Arc<translate::Instance>) {
     log::info!("{} lines will be processed", source_lines.len());
 
     // 출력 테스크 처리기 ... File I/O 등 처리
-    tokio::spawn(output_task(rx_task));
+    let output_task = tokio::task::spawn_local(output_task(rx_task));
 
     // 처리할 라인
     let mut proc_lines = Vec::new();
     let mut previous_context = Vec::new();
     let mut empty_line_count = 0;
 
+    // ctrl-c 처리.
+    let stop_queued = Arc::new(AtomicBool::new(false));
+    tokio::spawn(capture!([stop_queued], async move {
+        let _ = tokio::signal::ctrl_c().await;
+        log::warn!("Ctrl-C received. System will be stopped after current batch request.");
+        log::info!("To stop quickly, press Ctrl-C again.");
+        stop_queued.store(true, Relaxed);
+    }));
+
     // 주 루프 -> 모든 라인 처리 시점까지
     while source_lines.is_empty() == false {
+        if stop_queued.load(Relaxed) {
+            log::info!("Stopping ...");
+            break;
+        }
+
         proc_lines.clear();
         let mut char_count = 0;
         let mut batch_count = 0;
@@ -165,13 +200,25 @@ async fn async_main(transl: Arc<translate::Instance>) {
             tx,
         );
 
-        tokio::spawn(task);
+        tokio::task::spawn_local(task);
 
         // 현재 컨텍스트를 이전 컨텍스트로 교체한다.
         if args.disable_leading_context == false {
             swap(&mut previous_context, &mut proc_lines);
         }
     }
+
+    // Wait for output task to be finished.
+    log::info!("Waiting for requested translation jobs to be finished ...");
+    drop(tx_task);
+    let _ = output_task.await;
+
+    // Let all output to be flushed.
+    spawn_blocking(|| {
+        let _ = output().lock().flush();
+    })
+    .await
+    .ok();
 }
 
 /* ----------------------------------------- Output Task ---------------------------------------- */
@@ -182,6 +229,9 @@ enum OutputTask {
 }
 
 async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
+    let mut total_prompt_count = 0;
+    let mut total_reply_count = 0;
+
     while let Some(x) = rx_result.recv().await {
         match x {
             OutputTask::PendingTranslation(rx) => {
@@ -190,14 +240,57 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
                     continue;
                 };
 
-                // TODO: write to output()
+                total_prompt_count += result.content.num_prompt_tokens;
+                total_reply_count += result.content.num_compl_tokens;
+
+                spawn_blocking(move || {
+                    let mut out = output().lock();
+
+                    if Args::get().print_source_block {
+                        for src in result.src {
+                            let _ = out.write_all(src.trim().as_bytes());
+
+                            for _ in 0..Args::get().line_sep + 1 {
+                                let _ = out.write_all(b"\n");
+                            }
+                        }
+                    }
+
+                    for (_, line) in result.content.lines() {
+                        let _ = out.write_all(line.trim().as_bytes());
+
+                        for _ in 0..Args::get().line_sep + 1 {
+                            let _ = out.write_all(b"\n");
+                        }
+                    }
+
+                    let _ = out.flush();
+                })
+                .await
+                .ok();
             }
 
             OutputTask::ContextSeparator => {
-                // TODO: write empty lines to output()
+                spawn_blocking(move || {
+                    let mut out = output().lock();
+                    for _ in 0..Args::get().context_separation + 1 {
+                        let _ = out.write_all(b"\n");
+                    }
+
+                    let _ = out.flush();
+                })
+                .await
+                .ok();
             }
         }
     }
+
+    log::info!(
+        "Output task finished. Prompt tokens: {}, Reply tokens: {} => {} tokens will be charged",
+        total_prompt_count,
+        total_reply_count,
+        total_reply_count + total_prompt_count
+    );
 }
 
 /* ----------------------------------------- Sender Task ---------------------------------------- */
@@ -214,6 +307,37 @@ async fn translate_task(
     sources: Vec<&'static str>,
     reply: oneshot::Sender<TranslationTask>,
 ) {
+    let leading_ctx = Some(leading_context)
+        .filter(|x| !x.is_empty())
+        .map(|x| x.join("\n"));
+
+    let input_ctx = TranslationInputContext::builder()
+        .leading_content(leading_ctx.as_ref().map(|x| x.as_str()))
+        .build();
+
+    loop {
+        break match h
+            .translate(&input_ctx, &mut sources.iter().copied(), &setting)
+            .await
+        {
+            Ok(result) => {
+                let _ = reply.send(TranslationTask {
+                    src: sources,
+                    content: result,
+                });
+            }
+
+            Err(translate::Error::OpenAI(e @ OpenAIError::ApiError(..))) => {
+                // TODO: Find continue condition ... -> For example, temporary rate limit
+                log::error!("OpenAI: {e:#}");
+            }
+
+            Err(e) => {
+                log::error!("failed to translate batch: {e:#}");
+                log::debug!("source line was: {sources:#?}");
+            }
+        };
+    }
 }
 
 /* ---------------------------------------------------------------------------------------------- */
@@ -245,15 +369,19 @@ fn file_read_lines(
     LINES.as_ref()?.get(line_range)
 }
 
-fn output() -> &'static (dyn std::io::Write + Send + Sync) {
+type BoxedWrite = Box<dyn std::io::Write + Send + Sync>;
+
+fn output() -> &'static Mutex<BoxedWrite> {
     lazy_static! {
-        static ref OUTPUT: Box<dyn std::io::Write + Send + Sync> = {
+        static ref OUTPUT: Mutex<BoxedWrite> = {
             let args = Args::get();
-            if let Some(path) = args.output.as_ref() {
+            let x: BoxedWrite = if let Some(path) = args.output.as_ref() {
                 Box::new(std::fs::File::create(path).unwrap())
             } else {
                 Box::new(std::io::stdout())
-            }
+            };
+
+            Mutex::new(x)
         };
     }
 
