@@ -195,7 +195,7 @@ pub struct TranslationResult {
 }
 
 impl TranslationResult {
-    pub fn lines(&self) -> impl Iterator<Item = (Option<usize>, &str)> {
+    pub fn lines(&self) -> impl Iterator<Item = (Option<usize>, &str)> + ExactSizeIterator {
         self.lines.iter().map(move |x| {
             let s = &self.source_string[x.byte_offset..][..x.byte_size];
             (x.src_index, s)
