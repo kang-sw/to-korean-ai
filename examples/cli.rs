@@ -249,6 +249,13 @@ async fn async_main(transl: Arc<translate::Instance>) {
         );
         let (tx, rx) = oneshot::channel();
 
+        if proc_lines.iter().copied().all(|x| has_lang_ch(x) == false) {
+            log::debug!("  SEND) * no target lang character detected. skip translation");
+            tx_task.send(OutputTask::WriteAsIs(proc_lines.clone())).ok();
+
+            continue;
+        }
+
         // 바운드 큐에 작업을 추가한다. 만약 이전 작업이 지연된 경우 await은 반환하지 않으므로
         // -> 자연스러운 부하 제어 가능
         tx_task.send(OutputTask::PendingTranslation(rx)).ok();
@@ -298,7 +305,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
 /* ----------------------------------------- Output Task ---------------------------------------- */
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, derive_more::IsVariant)]
 enum Style {
     Plain,
     Markdown,
@@ -306,6 +313,7 @@ enum Style {
 
 enum OutputTask {
     PendingTranslation(oneshot::Receiver<TranslationTask>),
+    WriteAsIs(Vec<&'static str>),
     ContextSeparator,
 }
 
@@ -400,13 +408,28 @@ async fn output_task(mut rx_result: mpsc::UnboundedReceiver<OutputTask>) {
 
                         let mut num_newline = Args::get().line_sep + 1;
 
-                        if matches!(output_style, Style::Markdown) {
+                        if output_style.is_markdown() {
                             num_newline = num_newline.max(2);
                         }
 
                         for _ in 0..num_newline {
                             let _ = out.write_all(b"\n");
                         }
+                    }
+
+                    let _ = out.flush();
+                })
+                .await
+                .ok();
+            }
+
+            OutputTask::WriteAsIs(x) => {
+                spawn_blocking(move || {
+                    let mut out = output().lock();
+
+                    for line in x {
+                        let _ = out.write_all(line.as_bytes());
+                        let _ = out.write_all(b"\n");
                     }
 
                     let _ = out.flush();
@@ -573,4 +596,34 @@ fn output() -> &'static Mutex<BoxedWrite> {
     }
 
     &*OUTPUT
+}
+
+fn has_lang_ch(x: &str) -> bool {
+    x.chars().any(|c| {
+        // ** CHECK CHARACTER IS VALID CJK + ASCII **
+
+        // Check character is valid Hangul
+        let is_hangul = c >= '\u{AC00}' && c <= '\u{D7AF}';
+
+        // Check character is valid Kana
+        let is_kana = c >= '\u{3040}' && c <= '\u{309F}';
+
+        // Check character is valid Kanji
+        let is_kanji = c >= '\u{3000}' && c <= '\u{303F}';
+
+        // Check character is valid Hiragana
+        let is_hiragana = c >= '\u{3040}' && c <= '\u{309F}';
+
+        // Check character is valid Katakana
+        let is_katakana = c >= '\u{30A0}' && c <= '\u{30FF}';
+
+        // Check character is valid ASCII
+        let is_ascii = c >= '\u{0020}' && c <= '\u{007E}';
+
+        // Check character is valid CJK
+        let is_cjk = is_hangul || is_kana || is_kanji || is_hiragana || is_katakana;
+
+        // Check character is valid
+        is_cjk || is_ascii
+    })
 }

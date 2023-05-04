@@ -3091,6 +3091,7 @@ version = "0.1.0"
 dependencies = [
  "capture-it",
  "clap",
+ "derive_more",
  "eframe",
  "env_logger",
  "log",
