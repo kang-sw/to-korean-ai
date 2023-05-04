@@ -32,11 +32,11 @@ struct Args {
     openai_api_key: Option<String>,
 
     /// Line number to start parsing
-    #[arg(long, default_value_t = 0)]
+    #[arg(short = 'O', long, default_value_t = 0)]
     offset: usize,
 
     /// Line count to finish parsing    
-    #[arg(long)]
+    #[arg(short = 'c', long)]
     count: Option<NonZeroUsize>,
 
     /// Output file path
@@ -44,8 +44,8 @@ struct Args {
     output: Option<String>,
 
     /// Line batch count
-    #[arg(short, long = "batch", default_value_t = NonZeroUsize::new(100).unwrap())]
-    batch_size: NonZeroUsize,
+    #[arg(short, long, default_value_t = NonZeroUsize::new(100).unwrap())]
+    line_batch: NonZeroUsize,
 
     /// Maximum characters for single translation. This is the most important parameter.
     #[arg(short = 'M', long, default_value_t = 1000)]
@@ -60,7 +60,7 @@ struct Args {
     disable_leading_context: bool,
 
     /// Number of maximum leading context lines.
-    #[arg(long, default_value_t = 3)]
+    #[arg(short = 'L', long, default_value_t = 5)]
     max_leading_context: usize,
 
     /// Number of maximum empty lines to separate context.
@@ -75,7 +75,7 @@ struct Args {
     line_sep: usize,
 
     /// Print source text line at the same time.
-    #[arg(long = "print-source")]
+    #[arg(short = 'S', long = "print-source")]
     print_source_block: bool,
 
     /// Whether to overwrite existing output file.
@@ -138,7 +138,9 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
     let setting = Arc::new(setting);
 
-    let (tx_task, rx_task) = tokio::sync::mpsc::channel(args.jobs);
+    let (tx_task, rx_task) = tokio::sync::mpsc::unbounded_channel();
+    let task_tickets = Arc::new(tokio::sync::Semaphore::new(args.jobs));
+
     let lines = if let Some(count) = args.count {
         file_read_lines(args.offset..args.offset + count.get())
     } else {
@@ -173,6 +175,8 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
     // 주 루프 -> 모든 라인 처리 시점까지
     while source_lines.is_empty() == false {
+        let permit = task_tickets.clone().acquire_owned().await.unwrap();
+
         if stop_queued.load(Relaxed) {
             log::info!("Stopping ...");
             break;
@@ -182,7 +186,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
         let mut char_count = 0;
         let mut batch_count = 0;
 
-        while batch_count < args.batch_size.get() {
+        while batch_count < args.line_batch.get() {
             if let Some(line) = source_lines.first() {
                 // 적어도 한 개의 문장이 번역 예정 + 이 문장 포함 시 최대 문자 수 초과 -> escape
                 if proc_lines.is_empty() == false && char_count + line.len() > args.max_chars {
@@ -194,8 +198,11 @@ async fn async_main(transl: Arc<translate::Instance>) {
                     empty_line_count = 0;
 
                     if replace(&mut new_context, false) {
-                        log::debug!("  * new context .. remaining lines: {}", source_lines.len());
-                        let _ = tx_task.send(OutputTask::ContextSeparator).await;
+                        log::debug!(
+                            "  SEND) * new context .. remaining lines: {}",
+                            source_lines.len()
+                        );
+                        tx_task.send(OutputTask::ContextSeparator).ok();
 
                         // 새 컨텍스트 ... 이전 컨텍스트 정보는 필요없게 되었음.
                         leading_context.clear();
@@ -207,13 +214,16 @@ async fn async_main(transl: Arc<translate::Instance>) {
                 } else {
                     empty_line_count += 1;
 
-                    // 공백인 라인이 일정 횟수 이상 반복되면 새 문맥으로 교체한다.
+                    // 공백인 라인이 일정 횟수 이상 반복
                     if empty_line_count == args.chapter_sep {
-                        new_context = true;
+                        // 이전 컨텍스트가 있을 때에만 새 컨텍스트로 간주.
+                        if leading_context.is_empty() == false || proc_lines.is_empty() == false {
+                            new_context = true;
+                        }
 
                         if proc_lines.is_empty() == false {
                             log::debug!(
-                                "  * context switched ... flushing at {} lines ",
+                                "  SEND) * context switched ... flushing at {} lines ",
                                 proc_lines.len()
                             );
                             break;
@@ -229,25 +239,24 @@ async fn async_main(transl: Arc<translate::Instance>) {
         }
 
         log::debug!(
-            "lines: {}(pending {})/{}, offset {}{}",
-            initial_num_lines - source_lines.len(),
-            proc_lines.len(),
-            initial_num_lines,
-            args.offset + initial_num_lines - source_lines.len(),
-            leading_context
-                .is_empty()
-                .then_some("")
-                .unwrap_or(", has leading context"),
+            "SEND) LINE={proc}++{pending} in total={total}, offset={ofst}{lead}, task={task}",
+            proc = initial_num_lines - source_lines.len(),
+            pending = proc_lines.len(),
+            total = initial_num_lines,
+            ofst = args.offset + initial_num_lines - source_lines.len(),
+            lead = leading_context.is_empty().then_some("").unwrap_or("(*)"),
+            task = args.jobs - task_tickets.available_permits(),
         );
         let (tx, rx) = oneshot::channel();
 
         // 바운드 큐에 작업을 추가한다. 만약 이전 작업이 지연된 경우 await은 반환하지 않으므로
         // -> 자연스러운 부하 제어 가능
-        let _ = tx_task.send(OutputTask::PendingTranslation(rx)).await;
+        tx_task.send(OutputTask::PendingTranslation(rx)).ok();
 
         // 비동기적으로 번역 태스크 실행
         let task = translate_task(
             transl.clone(),
+            permit,
             setting.clone(),
             (!args.disable_leading_context)
                 .then(|| leading_context.clone())
@@ -300,9 +309,11 @@ enum OutputTask {
     ContextSeparator,
 }
 
-async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
+async fn output_task(mut rx_result: mpsc::UnboundedReceiver<OutputTask>) {
     let mut total_prompt_count = 0;
     let mut total_reply_count = 0;
+    let mut req_counter = 0;
+    let start_at = Instant::now();
 
     let output_style = match Args::get()
         .output
@@ -325,22 +336,30 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
                     continue;
                 };
 
+                req_counter += 1;
                 total_prompt_count += result.content.num_prompt_tokens;
                 total_reply_count += result.content.num_compl_tokens;
+                let delta_time = start_at.elapsed().as_secs_f64();
+                let tok_rate = (total_prompt_count + total_reply_count) as f64 / delta_time;
+                let req_rate = req_counter as f64 / delta_time;
 
                 log::debug!(
                     concat!(
-                        "writing {line} lines.",
-                        " {time:.2} seconds elapsed.",
-                        " {total_prompt} (+{added_prompt}) prompt,",
-                        " {total_reply} (+{added_reply}) reply tokens"
+                        "WRITE) [{delta:.1}s] +{line} line",
+                        " in {time:.2}s,",
+                        " prm={total_prompt}(+{added_prompt}),",
+                        " rep={total_reply}(+{added_reply}),",
+                        " tpm={tok_r:.1}, rpm={req_r:.2}"
                     ),
-                    line = result.content.num_compl_tokens,
+                    delta = delta_time,
+                    line = result.content.lines().len(),
                     time = result.start_at.elapsed().as_secs_f64(),
                     total_prompt = total_prompt_count,
                     added_prompt = result.content.num_prompt_tokens,
                     total_reply = total_reply_count,
                     added_reply = result.content.num_compl_tokens,
+                    tok_r = tok_rate * 60.0,
+                    req_r = req_rate * 60.0,
                 );
 
                 spawn_blocking(move || {
@@ -436,6 +455,7 @@ struct TranslationTask {
 
 async fn translate_task(
     h: Arc<translate::Instance>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
     setting: Arc<translate::Settings>,
     leading_context: Vec<&'static str>,
     sources: Vec<&'static str>,
