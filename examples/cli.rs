@@ -209,7 +209,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
     }
 
     // Wait for output task to be finished.
-    log::info!("Waiting for requested translation jobs to be finished ...");
+    log::info!("Waiting for remaining translation jobs to be finished ...");
     drop(tx_task);
     let _ = output_task.await;
 
