@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering::Relaxed},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use capture_it::capture;
@@ -52,7 +52,7 @@ struct Args {
     max_chars: usize,
 
     /// Number of parallel translation jobs. This is affected by OpenAI API rate limit.
-    #[arg(short, long, default_value_t = 1)]
+    #[arg(short, long, default_value_t = 5)]
     jobs: usize,
 
     /// Disables leading context features
@@ -85,6 +85,14 @@ struct Args {
     /// Model temperature
     #[arg(long)]
     temperature: Option<f32>,
+
+    /// Retry count on failure
+    #[arg(long, default_value_t = 3)]
+    retry: usize,
+
+    /// Retry interval in milliseconds
+    #[arg(long, default_value_t = 30_000)]
+    retry_after: usize,
 }
 
 impl Args {
@@ -442,9 +450,11 @@ async fn translate_task(
         .build();
 
     let start_at = Instant::now();
+    let args = Args::get();
+    let mut tries = 0;
 
     loop {
-        break match h
+        match h
             .translate(&input_ctx, &mut sources.iter().copied(), &setting)
             .await
         {
@@ -454,6 +464,8 @@ async fn translate_task(
                     src: sources,
                     content: result,
                 });
+
+                break;
             }
 
             Err(translate::Error::OpenAI(e @ OpenAIError::ApiError(..))) => {
@@ -466,6 +478,15 @@ async fn translate_task(
                 log::debug!("source line was: {sources:#?}");
             }
         };
+
+        if tries + 1 < args.retry {
+            tries += 1;
+            log::info!("retrying in {}ms ...", args.retry_after);
+            tokio::time::sleep(Duration::from_millis(args.retry_after as _)).await;
+        } else {
+            log::warn!("all retries exhausted. skipping this batch");
+            break;
+        }
     }
 }
 
@@ -485,7 +506,10 @@ fn file_read_lines(
             None
         } else {
             let content = std::fs::read_to_string(sample_path).ok()?;
-            let content = content.lines().map(|x| x.to_owned()).collect::<Vec<_>>();
+            let content = content
+                .lines()
+                .map(|x| x.replace("\u{3000}", " "))
+                .collect::<Vec<_>>();
 
             Some(content)
         }
