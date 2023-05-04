@@ -151,17 +151,18 @@ pub mod profiles {
                 let mut ret = Vec::with_capacity(10);
                 let lang = src_lang.to_korean();
 
-                ret.push((
-                    Role::System,
-                    format!("맥락 기반의 한국어 -> {lang} 번역기").into(),
-                ));
+                // ret.push((
+                //     Role::System,
+                //     format!("맥락 기반의 한국어 -> {lang} 번역기").into(),
+                // ));
 
                 if pre_ctx.is_empty() == false {
                     ret.push((
                         Role::User,
                         format!(
                             concat!(
-                                "다음은 {_1} 소설 앞부분의 내용입니다. 문맥을 파악하기 위해 제공되었습니다.\n\n",
+                                "**지시사항 \n",
+                                "다음은 {_1} 소설 앞부분의 내용입니다. 이제부터 번역할 내용의 맥락을 파악하기 위해 제공되었습니다.\n\n",
                                 "[[[시작]]]\n{_0}\n[[[끝]]]\n\n",
                                 "내용을 이해했습니까?"
                             ),
@@ -173,7 +174,7 @@ pub mod profiles {
 
                     ret.push((
                         Role::Assistant,
-                        format!("네. 입력된 {lang} 소설의 문맥을 파악했습니다.").into(),
+                        format!("네. 입력된 {lang} 원문의 맥락을 파악했습니다. 다음 지시사항을 말씀해주세요.").into(),
                     ));
                 }
 
@@ -185,12 +186,13 @@ pub mod profiles {
                     Role::User,
                     format!(
                         concat!(
+                            "**지시사항\n",
                             "다음 규칙을 바탕으로 {lang} 소설을 자연스러운 한국어로 번역하십시오.\n\n",
                             "- 등장인물의 대사를 포함한 모든 문장에서, 존댓말의 사용을 최소화한다.\n",
                             "- 의역을 우선시하여, 자연스러운 한국어 문장을 출력한다.\n",
                             "- 원문의 번역내용 이외의 다른 텍스트를 출력하지 않는다.\n",
                             "\n\n\n",
-                            "<{lang} 소설 원문>\n\n",
+                            "<번역할 {lang} 소설 원문>\n\n",
                             "{content}"
                         ),
                         lang = lang,

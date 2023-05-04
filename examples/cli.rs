@@ -1,11 +1,12 @@
 use std::{
-    mem::swap,
     num::NonZeroUsize,
+    path::Path,
     slice::SliceIndex,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
         Arc,
     },
+    time::Instant,
 };
 
 use capture_it::capture;
@@ -14,6 +15,7 @@ use lib::{
     config_it::lazy_static,
     translate::{self, TranslationInputContext},
 };
+use log::LevelFilter;
 use parking_lot::Mutex;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -57,12 +59,16 @@ struct Args {
     #[arg(long)]
     disable_leading_context: bool,
 
+    /// Number of maximum leading context lines.
+    #[arg(long, default_value_t = 5)]
+    max_leading_context: usize,
+
     /// Number of maximum empty lines to separate context.
     ///
     /// For example, if this value is 2, then after 3 lines of empty lines, next line will be
     /// treated as different context.
-    #[arg(short = 'C', long, default_value_t = 1)]
-    context_separation: usize,
+    #[arg(short = 'C', long = "chapter", default_value_t = 3)]
+    chapter_sep: usize,
 
     /// Number of line separator between every lines.
     #[arg(long, default_value_t = 1)]
@@ -71,6 +77,9 @@ struct Args {
     /// Print source text line at the same time.
     #[arg(long = "print-source")]
     print_source_block: bool,
+
+    #[arg(long)]
+    overwrite: bool,
 }
 
 impl Args {
@@ -84,7 +93,7 @@ impl Args {
 
 fn main() {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warning");
+        std::env::set_var("RUST_LOG", "warn,cli=debug");
     }
 
     env_logger::init();
@@ -134,8 +143,9 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
     // 처리할 라인
     let mut proc_lines = Vec::new();
-    let mut previous_context = Vec::new();
+    let mut leading_context = Vec::new();
     let mut empty_line_count = 0;
+    let initial_num_lines = source_lines.len();
 
     // ctrl-c 처리.
     let stop_queued = Arc::new(AtomicBool::new(false));
@@ -166,6 +176,8 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
                 // 공백이 아닌 라인만 집어넣는다.
                 if let Some(line) = Some(line.trim()).filter(|x| x.is_empty() == false) {
+                    empty_line_count = 0;
+
                     proc_lines.push(line);
                     char_count += line.len();
                     batch_count += 1;
@@ -173,12 +185,18 @@ async fn async_main(transl: Arc<translate::Instance>) {
                     // 공백인 라인이 일정 횟수 이상 반복되면 새 문맥으로 교체한다.
                     empty_line_count += 1;
 
-                    if empty_line_count > args.context_separation
-                        && previous_context.is_empty() == false
-                    {
-                        log::debug!("new context .. remaining lines: {}", source_lines.len());
-                        let _ = tx_task.send(OutputTask::ContextSeparator).await;
-                        previous_context.clear();
+                    if empty_line_count == args.chapter_sep {
+                        log::debug!("  * new context .. remaining lines: {}", source_lines.len());
+                        if leading_context.is_empty() == false {
+                            log::debug!("  * has active context ... inserting new separator.");
+                            let _ = tx_task.send(OutputTask::ContextSeparator).await;
+                            leading_context.clear();
+                        }
+
+                        if proc_lines.is_empty() == false {
+                            log::debug!("  * breaking out of context earlier");
+                            break;
+                        }
                     }
                 }
 
@@ -189,6 +207,17 @@ async fn async_main(transl: Arc<translate::Instance>) {
             }
         }
 
+        log::debug!(
+            "lines: {}(pending {})/{}, offset {}{}",
+            initial_num_lines - source_lines.len(),
+            proc_lines.len(),
+            initial_num_lines,
+            args.offset + initial_num_lines - source_lines.len(),
+            leading_context
+                .is_empty()
+                .then_some("")
+                .unwrap_or(", has leading context"),
+        );
         let (tx, rx) = oneshot::channel();
 
         // 바운드 큐에 작업을 추가한다. 만약 이전 작업이 지연된 경우 await은 반환하지 않으므로
@@ -199,7 +228,9 @@ async fn async_main(transl: Arc<translate::Instance>) {
         let task = translate_task(
             transl.clone(),
             setting.clone(),
-            previous_context.clone(),
+            (!args.disable_leading_context)
+                .then(|| leading_context.clone())
+                .unwrap_or_default(),
             proc_lines.clone(),
             tx,
         );
@@ -207,9 +238,8 @@ async fn async_main(transl: Arc<translate::Instance>) {
         tokio::task::spawn_local(task);
 
         // 현재 컨텍스트를 이전 컨텍스트로 교체한다.
-        if args.disable_leading_context == false {
-            swap(&mut previous_context, &mut proc_lines);
-        }
+        let proc_lines = proc_lines.iter().rev().skip(args.max_leading_context).rev();
+        leading_context.splice(.., proc_lines.copied());
     }
 
     // Wait for output task to be finished.
@@ -223,9 +253,23 @@ async fn async_main(transl: Arc<translate::Instance>) {
     })
     .await
     .ok();
+
+    // Finish notification
+    log::info!(
+        "finished. Current line offset: {} (started from {}, {} lines processed)",
+        args.offset + initial_num_lines - source_lines.len(),
+        args.offset,
+        initial_num_lines - source_lines.len()
+    );
 }
 
 /* ----------------------------------------- Output Task ---------------------------------------- */
+
+#[derive(Debug, Clone, Copy)]
+enum Style {
+    Plain,
+    Markdown,
+}
 
 enum OutputTask {
     PendingTranslation(oneshot::Receiver<TranslationTask>),
@@ -235,6 +279,19 @@ enum OutputTask {
 async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
     let mut total_prompt_count = 0;
     let mut total_reply_count = 0;
+
+    let output_style = match Args::get()
+        .output
+        .as_ref()
+        .map(|x| x.as_str())
+        .and_then(|x| Path::new(x).extension().and_then(|x| x.to_str()))
+        .unwrap_or("txt")
+    {
+        "md" => Style::Markdown,
+        _ => Style::Plain,
+    };
+
+    log::info!("output style set to: {output_style:?}");
 
     while let Some(x) = rx_result.recv().await {
         match x {
@@ -247,23 +304,64 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
                 total_prompt_count += result.content.num_prompt_tokens;
                 total_reply_count += result.content.num_compl_tokens;
 
+                log::debug!(
+                    concat!(
+                        "writing {line} lines.",
+                        " {time:.2} seconds elapsed.",
+                        " {total_prompt} (+{added_prompt}) prompt,",
+                        " {total_reply} (+{added_reply}) reply tokens"
+                    ),
+                    line = result.content.num_compl_tokens,
+                    time = result.start_at.elapsed().as_secs_f64(),
+                    total_prompt = total_prompt_count,
+                    added_prompt = result.content.num_prompt_tokens,
+                    total_reply = total_reply_count,
+                    added_reply = result.content.num_compl_tokens,
+                );
+
                 spawn_blocking(move || {
                     let mut out = output().lock();
 
                     if Args::get().print_source_block {
                         for src in result.src {
-                            let _ = out.write_all(src.trim().as_bytes());
+                            match output_style {
+                                Style::Markdown => {
+                                    let _ = out.write_fmt(format_args!("> {}\n", src.trim()));
 
-                            for _ in 0..Args::get().line_sep + 1 {
+                                    for _ in 0..Args::get().line_sep.max(1) {
+                                        let _ = out.write_all(b"> \n");
+                                    }
+                                }
+                                Style::Plain => {
+                                    let _ = out.write_all(src.trim().as_bytes());
+
+                                    for _ in 0..Args::get().line_sep + 1 {
+                                        let _ = out.write_all(b"\n");
+                                    }
+                                }
+                            }
+                        }
+
+                        match output_style {
+                            Style::Markdown => {
+                                // Insert empty line between commentary block and the content
                                 let _ = out.write_all(b"\n");
                             }
+                            Style::Plain => {}
                         }
                     }
 
                     for (_, line) in result.content.lines() {
+                        assert!(!line.is_empty());
                         let _ = out.write_all(line.trim().as_bytes());
 
-                        for _ in 0..Args::get().line_sep + 1 {
+                        let mut num_newline = Args::get().line_sep + 1;
+
+                        if matches!(output_style, Style::Markdown) {
+                            num_newline = num_newline.max(2);
+                        }
+
+                        for _ in 0..num_newline {
                             let _ = out.write_all(b"\n");
                         }
                     }
@@ -277,7 +375,7 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
             OutputTask::ContextSeparator => {
                 spawn_blocking(move || {
                     let mut out = output().lock();
-                    for _ in 0..Args::get().context_separation + 1 {
+                    for _ in 0..Args::get().chapter_sep + 1 {
                         let _ = out.write_all(b"\n");
                     }
 
@@ -301,6 +399,7 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
 
 struct TranslationTask {
     src: Vec<&'static str>,
+    start_at: Instant,
     content: translate::TranslationResult,
 }
 
@@ -319,6 +418,8 @@ async fn translate_task(
         .leading_content(leading_ctx.as_ref().map(|x| x.as_str()))
         .build();
 
+    let start_at = Instant::now();
+
     loop {
         break match h
             .translate(&input_ctx, &mut sources.iter().copied(), &setting)
@@ -326,6 +427,7 @@ async fn translate_task(
         {
             Ok(result) => {
                 let _ = reply.send(TranslationTask {
+                    start_at,
                     src: sources,
                     content: result,
                 });
@@ -379,8 +481,20 @@ fn output() -> &'static Mutex<BoxedWrite> {
     lazy_static! {
         static ref OUTPUT: Mutex<BoxedWrite> = {
             let args = Args::get();
+            log::info!(
+                "Creating file with {} mode ...",
+                args.overwrite.then_some("overwrite").unwrap_or("append")
+            );
+
             let x: BoxedWrite = if let Some(path) = args.output.as_ref() {
-                Box::new(std::fs::File::create(path).unwrap())
+                Box::new(
+                    std::fs::OpenOptions::new()
+                        .append(!args.overwrite)
+                        .write(true)
+                        .create(true)
+                        .open(path)
+                        .expect("Opening file failed"),
+                )
             } else {
                 Box::new(std::io::stdout())
             };
