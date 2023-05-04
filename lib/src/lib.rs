@@ -1,4 +1,3 @@
-pub mod book;
 pub mod lang;
 pub mod translate;
 pub mod io {
