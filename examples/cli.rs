@@ -72,8 +72,8 @@ struct Args {
     line_sep: usize,
 
     /// Print source text line at the same time.
-    #[arg(short = 'S', long = "print-source")]
-    print_source_block: bool,
+    #[arg(long)]
+    no_source: bool,
 
     /// Whether to overwrite existing output file.
     #[arg(long)]
@@ -92,8 +92,8 @@ struct Args {
     retry_after: usize,
 
     /// Append metadata for each output blocks
-    #[arg(short = 'G', long)]
-    metadata: bool,
+    #[arg(long)]
+    no_metadata: bool,
 }
 
 impl Args {
@@ -165,6 +165,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
     let mut new_context = false;
     let num_file_total_lines: usize = file_read_lines(..).unwrap().len();
     let initial_num_lines = source_lines.len();
+    let start_when = Instant::now();
 
     // ctrl-c 처리.
     let stop_queued = Arc::new(AtomicBool::new(false));
@@ -241,8 +242,12 @@ async fn async_main(transl: Arc<translate::Instance>) {
         }
 
         let processed_lines = initial_num_lines - source_lines.len();
+        let percent = processed_lines as f64 / initial_num_lines as f64 * 100.0;
+        let delta_time = start_when.elapsed().as_secs_f64();
+        let eta = delta_time / (percent / 100.0);
+
         log::debug!(
-            "SEND) LINE={proc}++{pending}/{total}({real_total}) ({percent:.2}%), offset={ofst}{lead}, task={task}",
+            "SEND) LINE={proc}++{pending}/{total}({real_total}) ({percent:.2}% ETA {eta_min:02}:{eta_sec:02}), offset={ofst}{lead}, task={task}",
             proc = processed_lines,
             pending = proc_lines.len(),
             total = initial_num_lines,
@@ -250,7 +255,9 @@ async fn async_main(transl: Arc<translate::Instance>) {
             ofst = args.offset + processed_lines,
             lead = leading_context.is_empty().then_some("").unwrap_or("(*)"),
             task = args.jobs - task_tickets.available_permits(),
-            percent = (processed_lines) as f64 / initial_num_lines as f64 * 100.0,
+            percent = percent,
+            eta_min = eta as u64 / 60,
+            eta_sec = eta as u64 % 60,
         );
         let (tx, rx) = oneshot::channel();
 
@@ -265,7 +272,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
         // -> 자연스러운 부하 제어 가능
         tx_task.send(OutputTask::PendingTranslation(rx)).ok();
 
-        if args.metadata {
+        if !args.no_metadata {
             tx_task
                 .send(OutputTask::Metadata(Metadata {
                     offset_cur: args.offset + processed_lines,
@@ -397,7 +404,7 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
 
                 let mut out = output().lock();
 
-                if args.print_source_block {
+                if !args.no_source {
                     for src in result.src {
                         match style {
                             Style::Markdown => {
