@@ -4,7 +4,7 @@
 
 ## CLI 툴 사용
 
-[`example/cli.rs`](example/cli.rs)
+[`examples/cli.rs`](example/cli.rs)
 
 Release에서 바이너리 다운로드.
 
