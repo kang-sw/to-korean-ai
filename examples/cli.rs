@@ -251,12 +251,10 @@ async fn async_main(transl: Arc<translate::Instance>) {
         tokio::task::spawn_local(task);
 
         // 현재 컨텍스트를 이전 컨텍스트로 교체한다.
-        let num_prev = args.max_leading_context.min(leading_context.len());
+        let num_prev = args.max_leading_context.min(proc_lines.len());
         leading_context.splice(
             ..,
-            proc_lines[leading_context.len() - num_prev..]
-                .iter()
-                .copied(),
+            proc_lines[proc_lines.len() - num_prev..].iter().copied(),
         );
     }
 
