@@ -160,12 +160,12 @@ pub mod profiles {
                         format!(
                             concat!(
                                 "**지시사항 \n\n",
-                                "다음 {_1} 원문의 내용을 먼저 이해하십시오.\n\n",
-                                "[[[시작]]]\n\n{_0}\n\n[[[끝]]]\n\n",
+                                "다음 {lang} 원문의 내용을 먼저 이해하십시오.\n\n",
+                                "[[[시작]]]\n\n{content}\n\n[[[끝]]]\n\n",
                                 "**출력 \n\n내용을 이해했다면 '네'라고 대답하십시오."
                             ),
-                            _0 = pre_ctx,
-                            _1 = lang,
+                            lang = lang,
+                            content = pre_ctx,
                         )
                         .into(),
                     ));
