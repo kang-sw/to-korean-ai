@@ -83,6 +83,10 @@ impl Args {
 }
 
 fn main() {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "warning");
+    }
+
     env_logger::init();
 
     let openai_key = std::env::var("OPENAI_API_KEY")
@@ -137,7 +141,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
     let stop_queued = Arc::new(AtomicBool::new(false));
     tokio::spawn(capture!([stop_queued], async move {
         let _ = tokio::signal::ctrl_c().await;
-        log::warn!("Ctrl-C received. System will be stopped after current batch request.");
+        log::warn!("Ctrl-C received. The program will be stopped after current batch request.");
         log::info!("To stop quickly, press Ctrl-C again.");
         stop_queued.store(true, Relaxed);
     }));
