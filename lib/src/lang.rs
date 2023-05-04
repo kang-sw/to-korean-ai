@@ -151,20 +151,20 @@ pub mod profiles {
                 let mut ret = Vec::with_capacity(10);
                 let lang = src_lang.to_korean();
 
-                // ret.push((
-                //     Role::System,
-                //     format!("맥락 기반의 한국어 -> {lang} 번역기").into(),
-                // ));
+                ret.push((
+                    Role::System,
+                    format!("지시사항에 따라 동작한다. 반드시 지시된 내용만 출력한다.").into(),
+                ));
 
                 if pre_ctx.is_empty() == false {
                     ret.push((
                         Role::User,
                         format!(
                             concat!(
-                                "**지시사항 \n",
+                                "**지시사항 \n\n",
                                 "다음 {_1} 원문의 내용을 먼저 이해하십시오.\n\n",
                                 "[[[시작]]]\n\n{_0}\n\n[[[끝]]]\n\n",
-                                "내용을 이해했다면 '네'라고 대답하십시오."
+                                "**출력 \n\n내용을 이해했다면 '네'라고 대답하십시오."
                             ),
                             _0 = pre_ctx,
                             _1 = lang,
@@ -183,14 +183,14 @@ pub mod profiles {
                     Role::User,
                     format!(
                         concat!(
-                            "**지시사항\n",
+                            "**지시사항\n\n",
                             "다음 규칙을 바탕으로 {lang} 소설을 한국어로 번역하십시오.\n\n",
                             "- 번역 과정에서 존댓말의 사용을 최소화한다.\n",
                             "- 화폐의 단위를 변경하지 않는다.\n",
                             "- 반드시 모든 문장을 한국어로 출력한다.\n",
                             "- 번역문 이외의 다른 텍스트를 출력하지 않는다.\n",
                             "\n\n\n",
-                            "> 다음 {lang} 원문을 한국어로 번역하십시오:\n\n",
+                            "**출력\n\n 다음 {lang} 원문을 한국어로 번역하십시오:\n\n",
                             "{content}"
                         ),
                         lang = lang,
