@@ -17,10 +17,7 @@ use lib::{
     translate::{self, TranslationInputContext},
 };
 use parking_lot::Mutex;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::spawn_blocking,
-};
+use tokio::{sync::oneshot, task::spawn_blocking};
 
 #[derive(clap::Parser)]
 struct Args {
@@ -93,6 +90,10 @@ struct Args {
     /// Retry interval in milliseconds
     #[arg(long, default_value_t = 30_000)]
     retry_after: usize,
+
+    /// Append metadata for each output blocks
+    #[arg(short = 'G', long)]
+    metadata: bool,
 }
 
 impl Args {
@@ -138,7 +139,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
     let setting = Arc::new(setting);
 
-    let (tx_task, rx_task) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_task, rx_task) = std::sync::mpsc::channel();
     let task_tickets = Arc::new(tokio::sync::Semaphore::new(args.jobs));
 
     let lines = if let Some(count) = args.count {
@@ -155,13 +156,14 @@ async fn async_main(transl: Arc<translate::Instance>) {
     log::info!("{} lines will be processed", source_lines.len());
 
     // 출력 테스크 처리기 ... File I/O 등 처리
-    let output_task = tokio::task::spawn_local(output_task(rx_task));
+    let output_task = tokio::task::spawn_blocking(move || output_worker(rx_task));
 
     // 처리할 라인
     let mut proc_lines = Vec::new();
     let mut leading_context = Vec::new();
     let mut empty_line_count = 0;
     let mut new_context = false;
+    let num_file_total_lines: usize = file_read_lines(..).unwrap().len();
     let initial_num_lines = source_lines.len();
 
     // ctrl-c 처리.
@@ -238,14 +240,17 @@ async fn async_main(transl: Arc<translate::Instance>) {
             }
         }
 
+        let processed_lines = initial_num_lines - source_lines.len();
         log::debug!(
-            "SEND) LINE={proc}++{pending} in total={total}, offset={ofst}{lead}, task={task}",
-            proc = initial_num_lines - source_lines.len(),
+            "SEND) LINE={proc}++{pending}/{total}({real_total}) ({percent:.2}%), offset={ofst}{lead}, task={task}",
+            proc = processed_lines,
             pending = proc_lines.len(),
             total = initial_num_lines,
-            ofst = args.offset + initial_num_lines - source_lines.len(),
+            real_total = num_file_total_lines,
+            ofst = args.offset + processed_lines,
             lead = leading_context.is_empty().then_some("").unwrap_or("(*)"),
             task = args.jobs - task_tickets.available_permits(),
+            percent = (processed_lines) as f64 / initial_num_lines as f64 * 100.0,
         );
         let (tx, rx) = oneshot::channel();
 
@@ -259,6 +264,14 @@ async fn async_main(transl: Arc<translate::Instance>) {
         // 바운드 큐에 작업을 추가한다. 만약 이전 작업이 지연된 경우 await은 반환하지 않으므로
         // -> 자연스러운 부하 제어 가능
         tx_task.send(OutputTask::PendingTranslation(rx)).ok();
+
+        if args.metadata {
+            tx_task
+                .send(OutputTask::Metadata(Metadata {
+                    offset_cur: args.offset + processed_lines,
+                }))
+                .ok();
+        }
 
         // 비동기적으로 번역 태스크 실행
         let task = translate_task(
@@ -314,16 +327,23 @@ enum Style {
 enum OutputTask {
     PendingTranslation(oneshot::Receiver<TranslationTask>),
     WriteAsIs(Vec<&'static str>),
+    Metadata(Metadata),
     ContextSeparator,
 }
 
-async fn output_task(mut rx_result: mpsc::UnboundedReceiver<OutputTask>) {
+struct Metadata {
+    offset_cur: usize,
+}
+
+fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
     let mut total_prompt_count = 0;
     let mut total_reply_count = 0;
     let mut req_counter = 0;
+    let args = Args::get();
     let start_at = Instant::now();
+    let total_line_count = file_read_lines(..).unwrap().len();
 
-    let output_style = match Args::get()
+    let style = match args
         .output
         .as_ref()
         .map(|x| x.as_str())
@@ -334,12 +354,17 @@ async fn output_task(mut rx_result: mpsc::UnboundedReceiver<OutputTask>) {
         _ => Style::Plain,
     };
 
-    log::info!("output style set to: {output_style:?}");
+    log::info!("output style set to: {style:?}");
+    let write_lf = |x: &mut dyn std::io::Write, n: usize| {
+        for _ in 0..n {
+            x.write_all(b"\n").ok();
+        }
+    };
 
-    while let Some(x) = rx_result.recv().await {
+    while let Ok(x) = rx_result.recv() {
         match x {
             OutputTask::PendingTranslation(rx) => {
-                let Ok(result) = rx.await else {
+                let Ok(result) = rx.blocking_recv() else {
                     log::warn!("Translation task failed");
                     continue;
                 };
@@ -370,93 +395,90 @@ async fn output_task(mut rx_result: mpsc::UnboundedReceiver<OutputTask>) {
                     req_r = req_rate * 60.0,
                 );
 
-                spawn_blocking(move || {
-                    let mut out = output().lock();
+                let mut out = output().lock();
 
-                    if Args::get().print_source_block {
-                        for src in result.src {
-                            match output_style {
-                                Style::Markdown => {
-                                    let _ = out.write_fmt(format_args!("> {}\n", src.trim()));
-
-                                    for _ in 0..Args::get().line_sep.max(1) {
-                                        let _ = out.write_all(b"> \n");
-                                    }
-                                }
-                                Style::Plain => {
-                                    let _ = out.write_all(src.trim().as_bytes());
-
-                                    for _ in 0..Args::get().line_sep + 1 {
-                                        let _ = out.write_all(b"\n");
-                                    }
-                                }
-                            }
-                        }
-
-                        match output_style {
+                if args.print_source_block {
+                    for src in result.src {
+                        match style {
                             Style::Markdown => {
-                                // Insert empty line between commentary block and the content
-                                let _ = out.write_all(b"\n");
+                                let _ = out.write_fmt(format_args!("> {}\n", src.trim()));
+
+                                for _ in 0..args.line_sep.max(1) {
+                                    let _ = out.write_all(b"> \n");
+                                }
                             }
-                            Style::Plain => {}
+                            Style::Plain => {
+                                let _ = out.write_all(src.trim().as_bytes());
+                                write_lf(&mut *out, args.line_sep + 1);
+                            }
                         }
                     }
 
-                    for (_, line) in result.content.lines() {
-                        assert!(!line.is_empty());
-                        let _ = out.write_all(line.trim().as_bytes());
+                    if style.is_markdown() {
+                        // Insert empty line between commentary block and the content
+                        let _ = out.write_all(b"\n");
+                    }
+                }
 
-                        let mut num_newline = Args::get().line_sep + 1;
+                for (_, line) in result.content.lines() {
+                    assert!(!line.is_empty());
+                    let _ = out.write_all(line.trim().as_bytes());
 
-                        if output_style.is_markdown() {
-                            num_newline = num_newline.max(2);
-                        }
-
-                        for _ in 0..num_newline {
-                            let _ = out.write_all(b"\n");
-                        }
+                    let mut num_newline = args.line_sep + 1;
+                    if style.is_markdown() {
+                        num_newline = num_newline.max(2);
                     }
 
-                    let _ = out.flush();
-                })
-                .await
-                .ok();
+                    write_lf(&mut *out, num_newline);
+                }
+
+                let _ = out.flush();
             }
 
             OutputTask::WriteAsIs(x) => {
-                spawn_blocking(move || {
-                    let mut out = output().lock();
+                let mut out = output().lock();
 
-                    for line in x {
-                        let _ = out.write_all(line.as_bytes());
-                        let _ = out.write_all(b"\n");
-                    }
+                for line in x {
+                    let _ = out.write_all(line.as_bytes());
+                    let _ = out.write_all(b"\n");
+                }
 
-                    let _ = out.flush();
-                })
-                .await
-                .ok();
+                let _ = out.flush();
             }
 
             OutputTask::ContextSeparator => {
-                spawn_blocking(move || {
-                    let mut out = output().lock();
+                let mut out = output().lock();
 
-                    match output_style {
-                        Style::Plain => (0..Args::get().chapter_sep + 1).for_each(|_| {
-                            out.write_all(b"\n").ok();
-                        }),
+                match style {
+                    Style::Plain => (0..args.chapter_sep + 1).for_each(|_| {
+                        out.write_all(b"\n").ok();
+                    }),
 
-                        Style::Markdown => {
-                            out.write_all(b"\n\n---\n\n").ok();
-                        }
+                    Style::Markdown => {
+                        out.write_all(b"\n\n---\n\n").ok();
                     }
+                }
 
-                    let _ = out.flush();
-                })
-                .await
-                .ok();
+                let _ = out.flush();
             }
+
+            OutputTask::Metadata(x) if style.is_markdown() => {
+                let mut out = output().lock();
+                let _ = out.write_fmt(format_args!(
+                    "\n\n[comment]: <> (OFFSET: {} / {})\n\n",
+                    x.offset_cur, total_line_count
+                ));
+            }
+
+            OutputTask::Metadata(x) if style.is_plain() => {
+                let mut out = output().lock();
+                let _ = out.write_fmt(format_args!(
+                    "\n(OFFSET: {} / {})",
+                    x.offset_cur, total_line_count
+                ));
+            }
+
+            OutputTask::Metadata(_) => unreachable!(),
         }
     }
 
