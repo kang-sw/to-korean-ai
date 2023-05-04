@@ -1,15 +1,19 @@
-use std::{num::NonZeroUsize, slice::SliceIndex, sync::Arc};
+use std::{mem::swap, num::NonZeroUsize, slice::SliceIndex, sync::Arc};
 
 use lib::{config_it::lazy_static, translate};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(clap::Parser)]
 struct Args {
     /// File to open
     file_name: String,
 
+    /// API key from commandline
+    #[arg(long)]
+    openai_api_key: Option<String>,
+
     /// Line number to start parsing
-    #[arg(short, long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0)]
     offset: usize,
 
     /// Line count to finish parsing    
@@ -21,18 +25,31 @@ struct Args {
     output: Option<String>,
 
     /// Line batch count
-    #[arg(short, long = "batch", default_value_t = NonZeroUsize::new(10).unwrap())]
+    #[arg(short, long = "batch", default_value_t = NonZeroUsize::new(100).unwrap())]
     batch_size: NonZeroUsize,
 
-    ///
-    #[arg(short = 'L', long = "lead", default_value_t = 0)]
-    leading_context_len: usize,
-
-    #[arg(short, long, default_value_t = 768)]
+    /// Maximum characters for single translation. This is the most important parameter.
+    #[arg(short = 'M', long, default_value_t = 768)]
     max_chars: usize,
 
+    /// Number of parallel translation jobs. This is affected by OpenAI API rate limit.
     #[arg(short, long, default_value_t = 10)]
     jobs: usize,
+
+    /// Disables leading context features
+    #[arg(long)]
+    disable_leading_context: bool,
+
+    /// Number of maximum empty lines to separate context.
+    ///
+    /// For example, if this value is 2, then after 3 lines of empty lines, next line will be
+    /// treated as different context.
+    #[arg(short = 'C', long, default_value_t = 1)]
+    context_separation: usize,
+
+    /// Number of line separator between every lines.
+    #[arg(long, default_value_t = 1)]
+    line_sep: usize,
 }
 
 impl Args {
@@ -47,7 +64,10 @@ impl Args {
 fn main() {
     env_logger::init();
 
-    let openai_key = std::env::var("OPENAI_KEY").expect("OPENAI_KEY env var not found");
+    let openai_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .or_else(|| Args::get().openai_api_key.clone())
+        .expect("API key not supplied: OPENAI_API_KEY env or --openai-api-key=?");
     let h = translate::Instance::new(&openai_key);
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -82,10 +102,15 @@ async fn async_main(transl: Arc<translate::Instance>) {
         return
     };
 
-    // TODO: Spawn task to handle `rx_task` --> which does output processing
+    log::info!("{} lines will be processed", source_lines.len());
+
+    // 출력 테스크 처리기 ... File I/O 등 처리
+    tokio::spawn(output_task(rx_task));
 
     // 처리할 라인
     let mut proc_lines = Vec::new();
+    let mut previous_context = Vec::new();
+    let mut empty_line_count = 0;
 
     // 주 루프 -> 모든 라인 처리 시점까지
     while source_lines.is_empty() == false {
@@ -105,10 +130,21 @@ async fn async_main(transl: Arc<translate::Instance>) {
                     proc_lines.push(line);
                     char_count += line.len();
                     batch_count += 1;
+                } else {
+                    // 공백인 라인이 일정 횟수 이상 반복되면 새 문맥으로 교체한다.
+                    empty_line_count += 1;
+
+                    if empty_line_count > args.context_separation
+                        && previous_context.is_empty() == false
+                    {
+                        log::debug!("new context .. remaining lines: {}", source_lines.len());
+                        let _ = tx_task.send(OutputTask::ContextSeparator).await;
+                        previous_context.clear();
+                    }
                 }
 
                 // Proceed once
-                source_lines = source_lines.split_at(0).1;
+                source_lines = source_lines.split_at(1).1;
             } else {
                 break;
             }
@@ -118,18 +154,55 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
         // 바운드 큐에 작업을 추가한다. 만약 이전 작업이 지연된 경우 await은 반환하지 않으므로
         // -> 자연스러운 부하 제어 가능
-        let _ = tx_task.send(rx).await;
+        let _ = tx_task.send(OutputTask::PendingTranslation(rx)).await;
 
         // 비동기적으로 번역 태스크 실행
-        let task = translate_task(transl.clone(), setting.clone(), proc_lines.clone(), tx);
+        let task = translate_task(
+            transl.clone(),
+            setting.clone(),
+            previous_context.clone(),
+            proc_lines.clone(),
+            tx,
+        );
+
         tokio::spawn(task);
+
+        // 현재 컨텍스트를 이전 컨텍스트로 교체한다.
+        if args.disable_leading_context == false {
+            swap(&mut previous_context, &mut proc_lines);
+        }
     }
 }
 
-/* ---------------------------------------------------------------------------------------------- */
-/*                                              TASK                                              */
-/* ---------------------------------------------------------------------------------------------- */
-struct FinishedTask {
+/* ----------------------------------------- Output Task ---------------------------------------- */
+
+enum OutputTask {
+    PendingTranslation(oneshot::Receiver<TranslationTask>),
+    ContextSeparator,
+}
+
+async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
+    while let Some(x) = rx_result.recv().await {
+        match x {
+            OutputTask::PendingTranslation(rx) => {
+                let Ok(result) = rx.await else {
+                    log::warn!("Translation task failed");
+                    continue;
+                };
+
+                // TODO: write to output()
+            }
+
+            OutputTask::ContextSeparator => {
+                // TODO: write empty lines to output()
+            }
+        }
+    }
+}
+
+/* ----------------------------------------- Sender Task ---------------------------------------- */
+
+struct TranslationTask {
     src: Vec<&'static str>,
     content: translate::TranslationResult,
 }
@@ -137,8 +210,9 @@ struct FinishedTask {
 async fn translate_task(
     h: Arc<translate::Instance>,
     setting: Arc<translate::Settings>,
+    leading_context: Vec<&'static str>,
     sources: Vec<&'static str>,
-    reply: oneshot::Sender<FinishedTask>,
+    reply: oneshot::Sender<TranslationTask>,
 ) {
 }
 
