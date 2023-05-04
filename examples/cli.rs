@@ -1,4 +1,5 @@
 use std::{
+    mem::replace,
     num::NonZeroUsize,
     path::Path,
     slice::SliceIndex,
@@ -51,7 +52,7 @@ struct Args {
     max_chars: usize,
 
     /// Number of parallel translation jobs. This is affected by OpenAI API rate limit.
-    #[arg(short, long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 1)]
     jobs: usize,
 
     /// Disables leading context features
@@ -150,6 +151,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
     let mut proc_lines = Vec::new();
     let mut leading_context = Vec::new();
     let mut empty_line_count = 0;
+    let mut new_context = false;
     let initial_num_lines = source_lines.len();
 
     // ctrl-c 처리.
@@ -183,23 +185,29 @@ async fn async_main(transl: Arc<translate::Instance>) {
                 if let Some(line) = Some(line.trim()).filter(|x| x.is_empty() == false) {
                     empty_line_count = 0;
 
+                    if replace(&mut new_context, false) {
+                        log::debug!("  * new context .. remaining lines: {}", source_lines.len());
+                        let _ = tx_task.send(OutputTask::ContextSeparator).await;
+
+                        // 새 컨텍스트 ... 이전 컨텍스트 정보는 필요없게 되었음.
+                        leading_context.clear();
+                    }
+
                     proc_lines.push(line);
                     char_count += line.len();
                     batch_count += 1;
                 } else {
-                    // 공백인 라인이 일정 횟수 이상 반복되면 새 문맥으로 교체한다.
                     empty_line_count += 1;
 
+                    // 공백인 라인이 일정 횟수 이상 반복되면 새 문맥으로 교체한다.
                     if empty_line_count == args.chapter_sep {
-                        log::debug!("  * new context .. remaining lines: {}", source_lines.len());
-                        if leading_context.is_empty() == false {
-                            log::debug!("  * has active context ... inserting new separator.");
-                            let _ = tx_task.send(OutputTask::ContextSeparator).await;
-                            leading_context.clear();
-                        }
+                        new_context = true;
 
                         if proc_lines.is_empty() == false {
-                            log::debug!("  * breaking out of context earlier");
+                            log::debug!(
+                                "  * context switched ... flushing at {} lines ",
+                                proc_lines.len()
+                            );
                             break;
                         }
                     }
@@ -243,8 +251,13 @@ async fn async_main(transl: Arc<translate::Instance>) {
         tokio::task::spawn_local(task);
 
         // 현재 컨텍스트를 이전 컨텍스트로 교체한다.
-        let proc_lines = proc_lines.iter().rev().skip(args.max_leading_context).rev();
-        leading_context.splice(.., proc_lines.copied());
+        let num_prev = args.max_leading_context.min(leading_context.len());
+        leading_context.splice(
+            ..,
+            proc_lines[leading_context.len() - num_prev..]
+                .iter()
+                .copied(),
+        );
     }
 
     // Wait for output task to be finished.
@@ -380,8 +393,15 @@ async fn output_task(mut rx_result: mpsc::Receiver<OutputTask>) {
             OutputTask::ContextSeparator => {
                 spawn_blocking(move || {
                     let mut out = output().lock();
-                    for _ in 0..Args::get().chapter_sep + 1 {
-                        let _ = out.write_all(b"\n");
+
+                    match output_style {
+                        Style::Plain => (0..Args::get().chapter_sep + 1).for_each(|_| {
+                            out.write_all(b"\n").ok();
+                        }),
+
+                        Style::Markdown => {
+                            out.write_all(b"\n\n---\n\n").ok();
+                        }
                     }
 
                     let _ = out.flush();
