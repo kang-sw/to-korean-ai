@@ -15,7 +15,6 @@ use lib::{
     config_it::lazy_static,
     translate::{self, TranslationInputContext},
 };
-use log::LevelFilter;
 use parking_lot::Mutex;
 use tokio::{
     sync::{mpsc, oneshot},
