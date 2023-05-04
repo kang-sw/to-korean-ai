@@ -47,7 +47,7 @@ struct Args {
     batch_size: NonZeroUsize,
 
     /// Maximum characters for single translation. This is the most important parameter.
-    #[arg(short = 'M', long, default_value_t = 1512)]
+    #[arg(short = 'M', long, default_value_t = 1000)]
     max_chars: usize,
 
     /// Number of parallel translation jobs. This is affected by OpenAI API rate limit.
@@ -59,7 +59,7 @@ struct Args {
     disable_leading_context: bool,
 
     /// Number of maximum leading context lines.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 3)]
     max_leading_context: usize,
 
     /// Number of maximum empty lines to separate context.
