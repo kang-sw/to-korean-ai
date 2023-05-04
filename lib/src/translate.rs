@@ -39,7 +39,7 @@ pub struct Settings {
     #[builder(default)]
     model: ChatModel,
 
-    #[builder(default, setter(strip_option))]
+    #[builder(default)]
     temperature: Option<f32>,
 }
 

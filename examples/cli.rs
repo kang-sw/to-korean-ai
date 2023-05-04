@@ -78,8 +78,13 @@ struct Args {
     #[arg(long = "print-source")]
     print_source_block: bool,
 
+    /// Whether to overwrite existing output file.
     #[arg(long)]
     overwrite: bool,
+
+    /// Model temperature
+    #[arg(long)]
+    temperature: Option<f32>,
 }
 
 impl Args {
@@ -116,13 +121,14 @@ fn main() {
 /*                                           ASYNC MAIN                                           */
 /* ---------------------------------------------------------------------------------------------- */
 async fn async_main(transl: Arc<translate::Instance>) {
+    let args = Args::get();
     let setting = translate::Settings::builder()
         .source_lang(lib::lang::Language::Japanese)
         .profile(Arc::new(lib::lang::profiles::KoreanV1))
+        .temperature(args.temperature.or(Some(0.1)))
         .build();
 
     let setting = Arc::new(setting);
-    let args = Args::get();
 
     let (tx_task, rx_task) = tokio::sync::mpsc::channel(args.jobs);
     let lines = if let Some(count) = args.count {
@@ -490,6 +496,8 @@ fn output() -> &'static Mutex<BoxedWrite> {
                 Box::new(
                     std::fs::OpenOptions::new()
                         .append(!args.overwrite)
+                        .truncate(args.overwrite)
+                        .read(false)
                         .write(true)
                         .create(true)
                         .open(path)
