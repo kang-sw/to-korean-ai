@@ -60,8 +60,6 @@ pub mod profiles {
 
         use async_openai::types::Role;
         use compact_str::CompactString;
-        use default::default;
-        use indoc::indoc;
         use lazy_static::lazy_static;
 
         use super::KoreanV1;
@@ -187,11 +185,12 @@ pub mod profiles {
                             "다음 규칙을 바탕으로 {lang} 소설을 한국어로 번역하십시오.\n\n",
                             "- 번역 과정에서 존댓말의 사용을 최소화한다.\n",
                             "- 화폐의 단위를 변경하지 않는다.\n",
-                            "- 반드시 모든 문장을 한국어로 출력한다.\n",
-                            "- 번역문 이외의 다른 텍스트를 출력하지 않는다.\n",
+                            "\n\n",
+                            "**원문\n\n",
+                            "{content}",
                             "\n\n\n",
-                            "**출력\n\n 다음 {lang} 원문을 한국어로 번역하십시오:\n\n",
-                            "{content}"
+                            "**출력\n\n",
+                            "제공된 '원문'을 한국어로 번역하여 출력하십시오.\n\n",
                         ),
                         lang = lang,
                         content = content
