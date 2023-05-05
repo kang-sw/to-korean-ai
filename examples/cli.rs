@@ -606,6 +606,12 @@ fn output() -> &'static Mutex<BoxedWrite> {
             );
 
             let x: BoxedWrite = if let Some(path) = args.output.as_ref() {
+                // Create parent directory chain
+                let path = std::path::Path::new(path);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+
                 Box::new(
                     std::fs::OpenOptions::new()
                         .append(!args.overwrite)
