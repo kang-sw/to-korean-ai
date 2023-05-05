@@ -80,8 +80,8 @@ struct Args {
     overwrite: bool,
 
     /// Model temperature
-    #[arg(long)]
-    temperature: Option<f32>,
+    #[arg(long, default_value_t = 0.1)]
+    temperature: f32,
 
     /// Retry count on failure
     #[arg(long, default_value_t = 3)]
@@ -134,7 +134,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
     let setting = translate::Settings::builder()
         .source_lang(lib::lang::Language::Japanese)
         .profile(Arc::new(lib::lang::profiles::KoreanV1))
-        .temperature(args.temperature.or(Some(0.1)))
+        .temperature(Some(args.temperature))
         .build();
 
     let setting = Arc::new(setting);
@@ -247,7 +247,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
         let eta = delta_time / (percent / 100.0);
 
         log::debug!(
-            "SEND) LINE={proc}++{pending}/{total}({real_total}) ({percent:.2}% ETA {eta_min:02}:{eta_sec:02}), offset={ofst}{lead}, task={task}",
+            "SEND) LINE={proc}++{pending}/{total} OFST={ofst}/{real_total} ({percent:.2}% ETA {eta_min:02}:{eta_sec:02}) {lead}, task={task}",
             proc = processed_lines,
             pending = proc_lines.len(),
             total = initial_num_lines,
@@ -393,7 +393,7 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
                     ),
                     delta = delta_time,
                     line = result.content.lines().len(),
-                    time = result.start_at.elapsed().as_secs_f64(),
+                    time = result.elapsed.as_secs_f64(),
                     total_prompt = total_prompt_count,
                     added_prompt = result.content.num_prompt_tokens,
                     total_reply = total_reply_count,
@@ -502,7 +502,7 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
 
 struct TranslationTask {
     src: Vec<&'static str>,
-    start_at: Instant,
+    elapsed: Duration,
     content: translate::TranslationResult,
 }
 
@@ -533,7 +533,7 @@ async fn translate_task(
         {
             Ok(result) => {
                 let _ = reply.send(TranslationTask {
-                    start_at,
+                    elapsed: start_at.elapsed(),
                     src: sources,
                     content: result,
                 });
