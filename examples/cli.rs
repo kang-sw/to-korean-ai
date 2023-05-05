@@ -202,7 +202,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
                     if replace(&mut new_context, false) {
                         log::debug!(
-                            "  SEND) * new context .. remaining lines: {}",
+                            "  SEND) end of context .. remaining lines: {}",
                             source_lines.len()
                         );
                         tx_task.send(OutputTask::ContextSeparator).ok();
@@ -226,7 +226,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
                         if proc_lines.is_empty() == false {
                             log::debug!(
-                                "  SEND) * context switched ... flushing at {} lines ",
+                                "  SEND) context switched ... flushing at {} lines ",
                                 proc_lines.len()
                             );
                             break;
@@ -262,7 +262,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
         let (tx, rx) = oneshot::channel();
 
         if proc_lines.iter().copied().all(|x| has_lang_ch(x) == false) {
-            log::debug!("  SEND) * no target lang character detected. skip translation");
+            log::debug!("  SEND) no target lang character detected. skip translation");
             tx_task.send(OutputTask::WriteAsIs(proc_lines.clone())).ok();
 
             continue;
@@ -316,7 +316,7 @@ async fn async_main(transl: Arc<translate::Instance>) {
 
     // Finish notification
     log::info!(
-        "finished. Current line offset: {} (started from {}, {} lines processed)",
+        "  FINISHED) Current line offset: {} (started from {}, {} lines processed)",
         args.offset + initial_num_lines - source_lines.len(),
         args.offset,
         initial_num_lines - source_lines.len()
@@ -490,7 +490,8 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
     }
 
     log::info!(
-        "Output task finished. Prompt tokens: {}, Reply tokens: {} => {} tokens will be charged",
+        "FINISHED) in {:.1} seconds. Prompt tokens: {} + Reply tokens: {} => {} will be charged",
+        start_at.elapsed().as_secs_f64(),
         total_prompt_count,
         total_reply_count,
         total_reply_count + total_prompt_count
