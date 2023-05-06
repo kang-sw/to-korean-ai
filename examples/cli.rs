@@ -76,7 +76,7 @@ struct Args {
     no_source: bool,
 
     /// Whether to overwrite existing output file.
-    #[arg(long)]
+    #[arg(short = 'W', long)]
     overwrite: bool,
 
     /// Model temperature
@@ -376,31 +376,38 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
                     continue;
                 };
 
-                req_counter += 1;
-                total_prompt_count += result.content.num_prompt_tokens;
-                total_reply_count += result.content.num_compl_tokens;
-                let delta_time = start_at.elapsed().as_secs_f64();
-                let tok_rate = (total_prompt_count + total_reply_count) as f64 / delta_time;
-                let req_rate = req_counter as f64 / delta_time;
+                let content = result.content;
 
-                log::debug!(
-                    concat!(
-                        "WRITE) [{delta:.1}s] +{line} line",
-                        " in {time:.2}s,",
-                        " prm={total_prompt}(+{added_prompt}),",
-                        " rep={total_reply}(+{added_reply}),",
-                        " tpm={tok_r:.1}, rpm={req_r:.2}"
-                    ),
-                    delta = delta_time,
-                    line = result.content.lines().len(),
-                    time = result.elapsed.as_secs_f64(),
-                    total_prompt = total_prompt_count,
-                    added_prompt = result.content.num_prompt_tokens,
-                    total_reply = total_reply_count,
-                    added_reply = result.content.num_compl_tokens,
-                    tok_r = tok_rate * 60.0,
-                    req_r = req_rate * 60.0,
-                );
+                req_counter += 1;
+
+                if let Some(content) = &content {
+                    total_prompt_count += content.num_prompt_tokens;
+                    total_reply_count += content.num_compl_tokens;
+                    let delta_time = start_at.elapsed().as_secs_f64();
+                    let tok_rate = (total_prompt_count + total_reply_count) as f64 / delta_time;
+                    let req_rate = req_counter as f64 / delta_time;
+
+                    log::debug!(
+                        concat!(
+                            "WRITE) [{delta:.1}s] +{line} line",
+                            " in {time:.2}s,",
+                            " prm={total_prompt}(+{added_prompt}),",
+                            " rep={total_reply}(+{added_reply}),",
+                            " tpm={tok_r:.1}, rpm={req_r:.2}"
+                        ),
+                        delta = delta_time,
+                        line = content.lines().len(),
+                        time = result.elapsed.as_secs_f64(),
+                        total_prompt = total_prompt_count,
+                        added_prompt = content.num_prompt_tokens,
+                        total_reply = total_reply_count,
+                        added_reply = content.num_compl_tokens,
+                        tok_r = tok_rate * 60.0,
+                        req_r = req_rate * 60.0,
+                    );
+                } else {
+                    log::warn!("WRITE) translation task failed");
+                }
 
                 let mut out = output().lock();
 
@@ -427,16 +434,20 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
                     }
                 }
 
-                for (_, line) in result.content.lines() {
-                    assert!(!line.is_empty());
-                    let _ = out.write_all(line.trim().as_bytes());
+                if let Some(content) = content {
+                    for (_, line) in content.lines() {
+                        assert!(!line.is_empty());
+                        let _ = out.write_all(line.trim().as_bytes());
 
-                    let mut num_newline = args.line_sep + 1;
-                    if style.is_markdown() {
-                        num_newline = num_newline.max(2);
+                        let mut num_newline = args.line_sep + 1;
+                        if style.is_markdown() {
+                            num_newline = num_newline.max(2);
+                        }
+
+                        write_lf(&mut *out, num_newline);
                     }
-
-                    write_lf(&mut *out, num_newline);
+                } else {
+                    let _ = out.write_all(b"-- translation failed --\n");
                 }
 
                 let _ = out.flush();
@@ -503,7 +514,7 @@ fn output_worker(rx_result: std::sync::mpsc::Receiver<OutputTask>) {
 struct TranslationTask {
     src: Vec<&'static str>,
     elapsed: Duration,
-    content: translate::TranslationResult,
+    content: Option<translate::TranslationResult>,
 }
 
 async fn translate_task(
@@ -535,7 +546,7 @@ async fn translate_task(
                 let _ = reply.send(TranslationTask {
                     elapsed: start_at.elapsed(),
                     src: sources,
-                    content: result,
+                    content: Some(result),
                 });
 
                 break;
@@ -558,6 +569,13 @@ async fn translate_task(
             tokio::time::sleep(Duration::from_millis(args.retry_after as _)).await;
         } else {
             log::warn!("all retries exhausted. skipping this batch");
+
+            let _ = reply.send(TranslationTask {
+                elapsed: start_at.elapsed(),
+                src: sources,
+                content: None,
+            });
+
             break;
         }
     }
